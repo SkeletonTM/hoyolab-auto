@@ -116,11 +116,17 @@ function flushDiscordNotifications () {
 		if (i === 0 && hasErrors && DISCORD_USER_ID) {
 			content = `<@${DISCORD_USER_ID}> ${content}`;
 		}
-		UrlFetchApp.fetch(DISCORD_WEBHOOK, {
-			method: "POST",
-			contentType: "application/json",
-			payload: JSON.stringify({ content })
-		});
+		try {
+			UrlFetchApp.fetch(DISCORD_WEBHOOK, {
+				method: "POST",
+				contentType: "application/json",
+				payload: JSON.stringify({ content }),
+				muteHttpExceptions: true
+			});
+		}
+		catch (e) {
+			console.error("flushDiscordNotifications", `Failed to POST to Discord: ${e?.message || e}`);
+		}
 		if (i < chunks.length - 1) {
 			Utilities.sleep(1000);
 		}
@@ -295,7 +301,7 @@ class Game {
 			}
 			catch (e) {
 				console.error(`${this.fullName}:CheckIn`, e);
-				logNotification("error", this.fullName, `Unexpected error: ${e.message}`);
+				logNotification("error", this.fullName, `Unexpected error: ${e?.message || String(e)}`);
 			}
 		}
 
@@ -333,7 +339,7 @@ class Game {
 			};
 		}
 		catch (e) {
-			console.error(`${this.fullName}:login`, `Error: ${e.message}`);
+			console.error(`${this.fullName}:login`, `Error: ${e?.message || String(e)}`);
 			throw e; // Re-throw to be handled by the caller
 		}
 	}
@@ -363,7 +369,7 @@ class Game {
 			return { success: true };
 		}
 		catch (e) {
-			console.error(`${this.fullName}:sign`, `Error: ${e.message}`);
+			console.error(`${this.fullName}:sign`, `Error: ${e?.message || String(e)}`);
 			return { success: false };
 		}
 	}
@@ -411,7 +417,7 @@ class Game {
 			};
 		}
 		catch (e) {
-			console.error(`${this.fullName}:getSignInfo`, `Error: ${e.message}`);
+			console.error(`${this.fullName}:getSignInfo`, `Error: ${e?.message || String(e)}`);
 			return { success: false };
 		}
 	}
@@ -448,7 +454,7 @@ class Game {
 		catch (e) {
 			console.error(
 				`${this.fullName}:getAwardsData`,
-				`Error: ${e.message}`
+				`Error: ${e?.message || String(e)}`
 			);
 			return { success: false };
 		}
@@ -534,9 +540,20 @@ class Game {
 	async fetchCodes () {
 		const gameParam = this.getGameParam();
 		const url = `https://api.ennead.cc/mihoyo/${gameParam}/codes`;
-		const response = await UrlFetchApp.fetch(url);
-		const data = JSON.parse(response.getContentText());
-		return data.active;
+		try {
+			const response = await UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+			const text = response.getContentText();
+			const data = JSON.parse(text);
+			if (!data || !Array.isArray(data.active)) {
+				throw new Error(`Unexpected codes payload: ${text.substring(0, 200)}`);
+			}
+			return data.active;
+		}
+		catch (e) {
+			console.error(`${this.fullName}:fetchCodes`, `Error: ${e?.message || e}`);
+			logNotification("error", this.fullName, `Failed to fetch promo codes: ${e?.message || e}`);
+			return [];
+		}
 	}
 
 	getGameParam () {
@@ -577,7 +594,7 @@ class Game {
 		}
 		catch (e) {
 			console.error(`Error redeeming code ${code} for ${this.fullName}:`, e);
-			return { success: false, message: e.message };
+			return { success: false, message: e?.message || String(e) };
 		}
 	}
 
@@ -699,7 +716,7 @@ function checkInGame (gameName) {
 		})
 		.catch((e) => {
 			console.error(`An error occurred during ${gameName} check-in:`, e);
-			logNotification("error", gameName, `Unhandled error: ${e.message}`);
+			logNotification("error", gameName, `Unhandled error: ${e?.message || String(e)}`);
 			throw e;
 		});
 }
@@ -784,8 +801,8 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 		}
 		catch (e) {
 			console.error(`Error redeeming codes for ${gameName}:`, e);
-			logNotification("error", gameName, `Error: ${e.message}`);
-			return { success: false, message: e.message };
+			logNotification("error", gameName, `Error: ${e?.message || String(e)}`);
+			return { success: false, message: e?.message || String(e) };
 		}
 	})).finally(() => {
 		flushDiscordNotifications();
