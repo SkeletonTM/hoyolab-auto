@@ -66,8 +66,6 @@ The cleanest way is the one that works for both **check-in and code redemption**
 4. In the right-hand pane, open the **Headers** tab, scroll to **Request Headers**, and copy the entire `cookie` value.
 5. Paste that string into the right `data: []` array in `config`.
 
-The full step-by-step guide (with screenshots) is in [`services/google-script/README.md`](services/google-script/README.md).
-
 ### 3. (Optional) Enable Discord notifications
 
 A few lines below the `config` object you'll see:
