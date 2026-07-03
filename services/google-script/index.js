@@ -74,10 +74,45 @@ const NOTIFICATION_ICONS = {
 	skip: "⏭️"
 };
 
+// Strip " (123456789)" trailing account-UIDs from any message.
+// HoYoLAB game_role_id is always a 7-10 digit number and is the only
+// place in the codebase where "(<digits>)" is appended to a nickname.
+const UID_PAREN_RE = /\s+\(\d+\)/g;
+
 function logNotification (level, gameName, message) {
 	const icon = NOTIFICATION_ICONS[level] || "ℹ️";
 	const prefix = gameName ? `[${gameName}]` : "";
-	NOTIFICATIONS.push(`${icon} ${prefix} ${message}`.trim());
+	const cleaned = message.replace(UID_PAREN_RE, "");
+	NOTIFICATIONS.push(`${icon} ${prefix} ${cleaned}`.trim());
+}
+
+// Voice lines for the Discord message wrapper, in the style of Ju Fufu
+// (橘福福 / "Фу-фу" — the tiger-agent Cunning Hare from Zenless Zone Zero).
+// Phrases are Russian with her characteristic "фу-фу-фу" purring and
+// maternal pet-names ("малыш", "зайка", "солнышко").
+const JU_FUFU_INTROS = [
+	"Фу-фу-фу~ Семейный отчёт на связи! 🐯",
+	"Мур-мур~ Заходи, посидим вместе~ 🐾",
+	"Ням-ням~ Очередной день, очередной отчёт~",
+	"Тигрёнок пришёл с проверкой~ Фу-фу-фу!",
+	"Хи-хи, снова за работой~ Готова послушать~ 🐯"
+];
+
+const JU_FUFU_OUTROS_OK = [
+	"Хорошего дня, солнышко~ 🐾",
+	"Фу-фу-фу, до завтра~",
+	"Береги себя, малыш~ 🐯",
+	"Мур-мур, всё будет хорошо~"
+];
+
+const JU_FUFU_OUTROS_ERR = [
+	"Ой-ой, что-то пошло не так... Фу-фу разберётся~ 🐾",
+	"Ох, ошибки... Не переживай, сестра рядом! 🐯",
+	"Фу-фу~ Видно, день не задался. Я рядом, малыш~"
+];
+
+function juFufuPick (arr) {
+	return arr[Math.floor(Math.random() * arr.length)];
 }
 
 function splitMessage (text, maxLen) {
@@ -109,7 +144,13 @@ function flushDiscordNotifications () {
 
 	const hasErrors = NOTIFICATIONS.some(line => line.includes("❌"));
 	const body = NOTIFICATIONS.join("\n");
-	const chunks = splitMessage(body, 1900); // Discord content limit is 2000
+	const intro = juFufuPick(JU_FUFU_INTROS);
+	const outro = juFufuPick(hasErrors ? JU_FUFU_OUTROS_ERR : JU_FUFU_OUTROS_OK);
+	// ">>> " on every report line marks it as a block-quote, visually
+	// separating Ju Fufu's commentary from the data she's reporting.
+	const quoted = body.split("\n").map(line => `>>> ${line}`).join("\n");
+	const wrapped = `${intro}\n${quoted}\n${outro}`;
+	const chunks = splitMessage(wrapped, 1900); // Discord content limit is 2000
 
 	for (let i = 0; i < chunks.length; i++) {
 		let content = chunks[i];
