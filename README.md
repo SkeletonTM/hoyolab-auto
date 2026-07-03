@@ -1,266 +1,162 @@
-<h1 align="center">
-    <img width="120" height="120" src="https://i.ibb.co/nRqTkXv/image.png" alt="HoyoLab Auto Logo"><br>
-    HoyoLab Auto
-</h1>
+# HoyoLab Auto — Google Apps Script edition
 
-<p align="center">
-   <img src="https://img.shields.io/badge/NodeJS-20.2.0-green" alt="NodeJS version badge">
-   <img src="https://img.shields.io/github/license/torikushiii/hoyolab-auto" alt="License badge">
-   <img src="https://img.shields.io/github/stars/torikushiii/hoyolab-auto" alt="GitHub stars badge">
-</p>
+A self-contained [Google Apps Script](https://script.google.com/) that signs you into Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, and Zenless Zone Zero every day, and (optionally) redeems active promo codes. Runs entirely on Google's infrastructure — no local machine, no Docker, no cost.
 
-A multi-purpose tool for any supported Hoyoverse games. This tool is designed to assist with daily check-ins, stamina checks, expedition checks, automatic code-redemption, and more.
+This is a fork of [torikushiii/hoyolab-auto](https://github.com/torikushiii/hoyolab-auto) trimmed down to just the Apps Script file, with a fixed Discord notification flow that actually works for code redemption.
 
-## Table of Contents
-- [HoyoLab Auto](#hoyolab-auto)
-  - [Table of Contents](#table-of-contents)
-  - [Google App Script](#google-app-script)
-  - [Supported Games](#supported-games)
-  - [Features](#features)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-    - [Cache File Location](#cache-file-location)
-  - [Migration](#migration)
-  - [Usage](#usage)
-  - [Notifications Setup](#notifications-setup)
-  - [Running with Docker](#running-with-docker)
-  - [Contributing](#contributing)
-  - [Buy Me a Coffee](#buy-me-a-coffee)
+## What's different from upstream
 
-## Google App Script
+| Area | Upstream (Google Script) | This fork |
+| --- | --- | --- |
+| Discord notifications on check-in | ✅ (but only when a new sign-in happens) | ✅ (always — even when already signed in) |
+| Discord notifications on code redemption | ❌ | ✅ |
+| Discord notifications on errors | ❌ | ✅ |
+| Number of webhook POSTs per run | up to 4 × accounts | exactly 1 |
+| `checkInAllGames()` flushes the buffer | ❌ | ✅ |
+| `manuallyRedeemCodes()` flushes the buffer | ❌ (had no notifications at all) | ✅ |
+| Files in the repo | 100+ (Node.js, Docker, …) | 5 |
 
-If you don't have a server to run this script and simply want to use it for checking in, you can deploy it as a [Google App Script](https://github.com/torikushiii/hoyolab-auto/tree/main/services) instead. The script lives in [services/google-script/index.js](services/google-script/index.js) and runs entirely on Google's infrastructure — no local machine, no cron job, no cost.
-
-## Supported Games
-- [x] Honkai Impact 3rd (Daily Check-In only)
-- [x] Tears of Themis (Daily Check-In only)
-- [x] Genshin Impact
-- [x] Honkai: Star Rail
-- [x] Zenless Zone Zero
-
-## Features
-- **Honkai Impact 3rd**:
-  - **Daily check-in**: Runs every midnight local time.
-
-- **Tears of Themis**:
-  - **Daily check-in**: Runs every midnight local time.
-
-- **Genshin Impact**:
-  - **Daily check-in**: Runs every midnight local time.
-  - **Dailies**: Reminds you to do your dailies, such as commissions if you haven't done them at 09:00 (local time).
-  - **Weeklies**: Reminds you to do your weekly bosses/discounted resin if you haven't done them at 09:00 (local time).
-  - **Stamina check**: Reminds you to spend your resin if you're at your set threshold or capped.
-  - **Expedition check**: Check your expeditions and sends a notification if they're done.
-  - **Realm currency**: Sends a notification if your realm currency is capped.
-  - **Code Redeems**: Search for codes and redeem them automatically.
-  - **Traveler's Diary**: Check your monthly currency income.
-- **Honkai: Star Rail**:
-  - **Daily check-in**: Runs every midnight local time.
-  - **Dailies**: Reminds you to do your dailies, such as commissions if you haven't done them at 09:00 (local time).
-  - **Stamina check**: Reminds you to spend your stamina if you're at your set threshold or capped.
-  - **Expedition check**: Check your expeditions and sends a notification if they're done.
-  - **Code Redeems**: Search for codes and redeem them automatically.
-  - **Trailblazer Monthly Calendar**: Check your monthly currency income.
-  - **Traveling Mimo**: Automatically complete Mimo tasks, claim points, and exchange for Stellar Jade.
-- **Zenless Zone Zero**:
-  - **Daily check-in**: Runs every midnight local time.
-  - **Dailies**: Reminds you to do your dailies, such as commissions if you haven't done them at 09:00 (local time).
-  - **Stamina check**: Reminds you to spend your stamina if you're at your set threshold or capped.
-  - **Howl Scratch Card**: Notifies you if you haven't scratched the card for the day at 09:00 (local time).
-  - **Shop Status**: Notifies you if the shop has finished selling videos.
-  - **Code Redeems**: Search for codes and redeem them automatically.
-  - **Traveling Mimo**: Automatically complete Mimo tasks, claim points, and exchange for Polychrome.
-
-## Prerequisites
-- [Git](https://git-scm.com/downloads)
-- [Node.js](https://nodejs.org/en/)
-
-## Installation
-1. Clone the repository.
-2. Run `npm install` to install the dependencies.
-3. You can configure your config using one of the following methods:
-
-    1. **Using the Setup Script:**
-      - For Windows, run the following npm script from the project root:
-        ```bash
-        npm run setup:windows
-        ```
-      - For Linux, use this command:
-        ```bash
-        npm run setup:linux
-        ```
-      - These commands will automatically open your default web browser to help you configure your settings through a web-based interface.
-
-    2. **Manual Configuration:**
-      - Copy the [`default.config.json5`](default.config.json5) file to create a [`config.json5`](config.json5) file:
-        ```bash
-        cp default.config.json5 config.json5
-        ```
-      - Open `config.json5` and update it with your application's configuration settings.
-
-4. Follow the instructions in the `default.config.json5` or `config.json5` file.
-5. Run the application:
-   ```bash
-   npm start
-   ```
-
-### Cache File Location
-
-After running the application for the first time, a cache file will be automatically created at:
+## Repository layout
 
 ```text
-./data/cache.json
+hoyolab-auto/
+├── LICENSE                                  # AGPL-3.0, inherited from upstream
+├── README.md                                # you are here
+├── .gitignore
+├── services/
+│   └── google-script/
+│       ├── index.js                         # the actual script — paste this into Apps Script
+│       └── README.md                        # original upstream setup guide (kept for reference)
+└── setup/
+    └── DISCORD_WEBHOOK.md                   # how to create a Discord webhook URL
 ```
 
-This file stores temporary data to improve performance and reduce API calls. The `data/` directory structure will look like this:
+## Quick start
+
+### 1. Create the script
+
+1. Open [https://script.google.com/](https://script.google.com/) and click **+ New project**.
+2. Delete the placeholder `function myFunction() { … }` in the editor.
+3. Open [`services/google-script/index.js`](services/google-script/index.js) in this repo, select all, copy, and paste it into the Apps Script editor.
+4. Click the 💾 floppy-disk icon to save. Name the project anything you like (e.g. "HoyoLab Auto").
+
+### 2. Add your accounts
+
+In the same editor, scroll to the top of the file. You'll see:
+
+```javascript
+const config = {
+	enableCodeRedemption: false, // set to true once everything else works
+	genshin:  { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
+	honkai:   { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
+	starrail: { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
+	zenless:  { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
+};
+```
+
+Replace the placeholders with your real cookies, one per line. For multiple accounts in the same game, add more strings inside the same `data: []` array.
+
+#### How to get the cookie
+
+The cleanest way is the one that works for both **check-in and code redemption** (the original repo warns that the check-in-page cookie often doesn't carry the right tokens for code redemption):
+
+1. Open [HoyoLab](https://www.hoyolab.com/) in your browser and sign in.
+2. Press `F12` to open DevTools and switch to the **Network** tab.
+3. Refresh the page; in the network log, search for `getGameRecordCard` and click the matching request.
+4. In the right-hand pane, open the **Headers** tab, scroll to **Request Headers**, and copy the entire `cookie` value.
+5. Paste that string into the right `data: []` array in `config`.
+
+The full step-by-step guide (with screenshots) is in [`services/google-script/README.md`](services/google-script/README.md).
+
+### 3. (Optional) Enable Discord notifications
+
+A few lines below the `config` object you'll see:
+
+```javascript
+const DISCORD_WEBHOOK = null;  // replace with your Discord webhook URL (optional)
+const DISCORD_USER_ID = "";    // optional, pings you when something goes wrong
+```
+
+Follow [`setup/DISCORD_WEBHOOK.md`](setup/DISCORD_WEBHOOK.md) to create a webhook, then paste the URL into `DISCORD_WEBHOOK` (inside quotes). To also get a `@mention` whenever an error appears in the report, paste your numeric Discord user ID into `DISCORD_USER_ID`.
+
+With the webhook set, **every** run ends with a single Discord message that looks like this:
 
 ```text
-project-root/
-├── data/
-│   ├── cache.json    # Auto-generated cache file
-│   └── README.md     # Cache documentation
-├── logs/             # Application logs (if logging is enabled)
-├── config.json5      # Your configuration file
-└── ...
+✅ [Genshin Impact] Alice (800000001): Got Primogem x20 (total: 31)
+⏭️ [Honkai: Star Rail] Bob (800000002): Already signed in today (total: 14)
+✅ [Zenless Zone Zero] Carol (800000003): Got Polychrome x50 (total: 8)
+🎁 [Genshin Impact] Code GENSHIN2026 claimed for Alice (800000001)
+⏭️ [Honkai: Star Rail] Code STARRAIL1 already redeemed for Bob
 ```
 
-**Important Notes:**
-- The cache file is automatically managed by the application
-- Do not manually edit the cache file
-- The cache file will be recreated if deleted
-- You can safely delete the cache file to reset cached data
-- The `data/` directory must be writable by the application
+### 4. (Optional) Enable code redemption
 
-## Migration
+Once the basic check-in is working for a day or two, set:
 
-> [!NOTE]
-> If you're still using the old `config.js` or `config.jsonc` files, run one of the following commands to migrate your configuration to the new `config.json5` format.
-
-```bash
-npm run migrate
+```javascript
+enableCodeRedemption: true,
 ```
 
-or
+This will additionally call `redeemCodes()` for each account that just signed in. Codes you've already redeemed are remembered in Apps Script's `PropertiesService`, so they will not be claimed twice.
 
-```bash
-node convert.js
-```
+If you ever need to force-redeem a code (e.g. the API didn't return it in time), pick one of these functions in the toolbar and run it once:
 
-## Usage
+- `redeemGenshinCodes(forceRedeem = true)` — Genshin
+- `redeemStarRailCodes(forceRedeem = true)` — Star Rail
+- `redeemZenlessCodes(forceRedeem = true)` — Zenless Zone Zero
 
-For a detailed usage guide, refer to this gist: [Cookie Guide](https://gist.github.com/torikushiii/59eff33fc8ea89dbc0b2e7652db9d3fd).
+For Honkai Impact 3rd, code redemption is not supported by this script.
 
-## Notifications Setup
+### 5. Set up a daily trigger
 
-For setting up Discord or Telegram notifications, see the [setup folder](https://github.com/torikushiii/hoyolab-auto/tree/main/setup). Both webhook-based Discord and Telegram bot-token flows are documented there.
+1. In the Apps Script editor, click the clock icon ⏰ on the left ("Triggers").
+2. Click **+ Add Trigger** in the bottom-right.
+3. Configure:
+   - **Choose which function to run:** `checkInAllGames`
+   - **Which deployment should run:** `Head`
+   - **Select event source:** `Time-driven`
+   - **Select type of time-based trigger:** `Day timer`
+   - **Select time of day:** your preferred local time (e.g. `8am – 9am`)
+4. Save. Google will ask you to authorise the script to access external services and your script properties — accept.
 
-## Running with Docker
+### 6. Run it once manually
 
-This application can be easily managed and run using Docker. We provide a [`Makefile`](Makefile) for convenience, but you can also use Docker commands directly.
+Click the ▶ **Run** button with `checkInAllGames` selected in the toolbar. The first run will pop up an authorisation dialog — accept it. Open the **Executions** tab in the left sidebar to see logs and any errors.
 
-**1. Prerequisites**
+If you set `DISCORD_WEBHOOK`, you should see the report message arrive in Discord within a few seconds.
 
-- **Docker:**  Ensure Docker is installed and running. Download it from [https://www.docker.com/](https://www.docker.com/).
-- **Docker Compose:** Most Docker installations include Docker Compose. If not, install it from [https://docs.docker.com/compose/install/](https://docs.docker.com/compose/install/).
+## What the script actually does
 
-**2. Configuration**
+`checkInAllGames()` does, in order:
 
-You can configure your config using one of the following methods:
+1. Resets the in-memory notification buffer.
+2. For each of the four games (Genshin, Honkai, Star Rail, Zenless):
+   - Calls `checkAndExecute()`, which for each cookie:
+     - looks up the account (`getAccountDetails`),
+     - reads today's sign-in status (`getSignInfo`),
+     - reads the award pool (`getAwardsData`),
+     - if the account hasn't signed in yet, performs the sign-in (`sign`).
+   - If `enableCodeRedemption` is on, redeems any new promo codes for each successful account (`redeemCodes`).
+3. Flushes the entire buffer to Discord as a single message (`flushDiscordNotifications`).
 
-1. **Using the Setup Script:**
-   - For Windows, run the following npm script from the project root:
-     ```bash
-     npm run setup:windows
-     ```
-   - For Linux, use this command:
-     ```bash
-     npm run setup:linux
-     ```
-   - These commands will automatically open your default web browser to help you configure your settings through a web-based interface.
+`manuallyRedeemCodes(gameName, forceRedeem)` is the same idea but only for code redemption, without the check-in step. It's used by the convenience wrappers `redeemGenshinCodes`, `redeemStarRailCodes`, and `redeemZenlessCodes`.
 
-2. **Manual Configuration:**
-   - Copy the `default.config.json5` file to create a `config.json5` file:
-     ```bash
-     cp default.config.json5 config.json5
-     ```
-   - Open `config.json5` and update it with your application's configuration settings.
-   - Set environment variable `CONFIG_PATH` to alter the configuration file path (default to `./config.json5`).
+## Troubleshooting
 
-**Important for Docker Users:**
-> [!NOTE]
-> When running with Docker, the cache file will be created inside the container at `/app/data/cache.json`. To persist cache data between container restarts, ensure the `data` directory is properly mounted as a volume (this is already configured in the provided [`docker-compose.yml`](docker-compose.yml)).
-> If this is your first time running Docker:
-> - Make sure your user is listed in the Docker group. You can do so by running `sudo usermod -aG docker $USER`, logging out, and back in.
-> - From the project root, grant yourself permission to avoid errors while accessing folders such as `data`. We can fix this by running `sudo chown -R $USER:$USER data logs && chmod -R 777 data logs`.
+**Nothing happens in Discord.**
+- Check that `DISCORD_WEBHOOK` is the full URL (`https://discord.com/api/webhooks/…`).
+- Check the **Executions** tab in Apps Script for a `flushDiscordNotifications` error.
+- Make sure `NOTIFICATIONS.length > 0`. If every account was already signed in *and* there are no code events and no errors, the buffer is empty and the script deliberately sends nothing.
 
-**3. Building and Running with Docker Compose**
+**I get `Error: undefined` in the report.**
+This is what the script writes when the underlying error has no `.message` field. Look at the surrounding text (e.g. `Failed to fetch promo codes: undefined`) — the function name usually tells you which API call failed. The full error is also in the **Executions** tab.
 
-**Using the Makefile (Recommended):**
+**Code redemption says "retcode -1071".**
+Your cookie has expired. Repeat step 2 to grab a fresh one. The error message in the report includes the exact `retcode` and the API's own message.
 
-The provided Makefile simplifies common Docker tasks.
+**My account was already signed in and codes weren't claimed.**
+This is the original upstream behaviour and we didn't change it: in `checkInAllGames`, code redemption only runs for accounts that *just* signed in. If everything was already signed in for the day, use `redeemGenshinCodes(true)` / `redeemStarRailCodes(true)` / `redeemZenlessCodes(true)` from the toolbar to force it.
 
-- **Build the image:**
-  ```bash
-  make build
-  ```
-- **Start the application:**
-  ```bash
-  make up
-  ```
-- **Stop the application:**
-  ```bash
-  make down
-  ```
-- **View logs:**
-  ```bash
-  make logs
-  ```
-- **Rebuild and restart:**
-  ```bash
-  make update
-  ```
+## License
 
-  For a complete list of available Makefile targets, run:
-
-  ```bash
-  make help
-  ```
-
-**Using Docker Compose Directly:**
-
-If you prefer not to use the Makefile, you can use the following Docker Compose commands:
-
-- **Build the image:**
-  ```bash
-  docker-compose build
-  ```
-- **Start the application:**
-  ```bash
-  docker-compose up -d
-  ```
-- **Stop the application:**
-  ```bash
-  docker-compose down
-  ```
-- **View logs:**
-  ```bash
-  docker-compose logs -f instance
-  ```
-- **Rebuild and restart:**
-  ```bash
-  docker-compose down && docker-compose build && docker-compose up -d
-  ```
-
-## Contributing
-
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change. Bugs and ideas can also be reported through issues — every report helps.
-
-**New to contributing?** To get started, fork the repo, make your changes, commit, and push them to your fork. Then open a pull request. If you're new to GitHub, [this tutorial](https://www.freecodecamp.org/news/how-to-make-your-first-pull-request-on-github-3#let-s-make-our-first-pull-request-) might help.
-
-You can support the project by giving it a star, sharing it with your friends, contributing to the project, and reporting any bugs you find.
-
-## Buy Me a Coffee
-
-If this repo is useful to you, you can support me by buying me a coffee. Thank you!
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/torikushiii)
+[AGPL-3.0](LICENSE), inherited from the upstream project. If you fork and run this as a service, the AGPL requires you to publish your modifications under the same licence.
