@@ -9,8 +9,6 @@
    <img src="https://img.shields.io/github/stars/torikushiii/hoyolab-auto" alt="GitHub stars badge">
 </p>
 
-# HoyoLab Auto
-
 A multi-purpose tool for any supported Hoyoverse games. This tool is designed to assist with daily check-ins, stamina checks, expedition checks, automatic code-redemption, and more.
 
 ## Table of Contents
@@ -30,8 +28,8 @@ A multi-purpose tool for any supported Hoyoverse games. This tool is designed to
   - [Buy Me a Coffee](#buy-me-a-coffee)
 
 ## Google App Script
-If you don't have a server to run this script and simply just want to use it for checking in, you can use Google App Script.
-  - [Google App Script](https://github.com/torikushiii/hoyolab-auto/tree/main/services)
+
+If you don't have a server to run this script and simply want to use it for checking in, you can deploy it as a [Google App Script](https://github.com/torikushiii/hoyolab-auto/tree/main/services) instead. The script lives in [services/google-script/index.js](services/google-script/index.js) and runs entirely on Google's infrastructure — no local machine, no cron job, no cost.
 
 ## Supported Games
 - [x] Honkai Impact 3rd (Daily Check-In only)
@@ -68,7 +66,7 @@ If you don't have a server to run this script and simply just want to use it for
   - **Daily check-in**: Runs every midnight local time.
   - **Dailies**: Reminds you to do your dailies, such as commissions if you haven't done them at 09:00 (local time).
   - **Stamina check**: Reminds you to spend your stamina if you're at your set threshold or capped.
-  - **Howl Scracth Card**: Notifies you if you haven't scratched the card for the day at 09:00 (local time).
+  - **Howl Scratch Card**: Notifies you if you haven't scratched the card for the day at 09:00 (local time).
   - **Shop Status**: Notifies you if the shop has finished selling videos.
   - **Code Redeems**: Search for codes and redeem them automatically.
   - **Traveling Mimo**: Automatically complete Mimo tasks, claim points, and exchange for Polychrome.
@@ -94,7 +92,7 @@ If you don't have a server to run this script and simply just want to use it for
       - These commands will automatically open your default web browser to help you configure your settings through a web-based interface.
 
     2. **Manual Configuration:**
-      - Copy the `default.config.json5` file to create a `config.json5` file:
+      - Copy the [`default.config.json5`](default.config.json5) file to create a [`config.json5`](config.json5) file:
         ```bash
         cp default.config.json5 config.json5
         ```
@@ -109,12 +107,14 @@ If you don't have a server to run this script and simply just want to use it for
 ### Cache File Location
 
 After running the application for the first time, a cache file will be automatically created at:
-```
+
+```text
 ./data/cache.json
 ```
 
 This file stores temporary data to improve performance and reduce API calls. The `data/` directory structure will look like this:
-```
+
+```text
 project-root/
 ├── data/
 │   ├── cache.json    # Auto-generated cache file
@@ -134,7 +134,7 @@ project-root/
 ## Migration
 
 > [!NOTE]
-> If you're using this project since the `config.js` file or `config.jsonc` and you're updating to the latest version, please run the following command to migrate your configuration to the new format.
+> If you're still using the old `config.js` or `config.jsonc` files, run one of the following commands to migrate your configuration to the new `config.json5` format.
 
 ```bash
 npm run migrate
@@ -147,15 +147,16 @@ node convert.js
 ```
 
 ## Usage
+
 For a detailed usage guide, refer to this gist: [Cookie Guide](https://gist.github.com/torikushiii/59eff33fc8ea89dbc0b2e7652db9d3fd).
 
 ## Notifications Setup
-For setting up Discord or Telegram notifications, refer to the [setup folder](https://github.com/torikushiii/hoyolab-auto/tree/main/setup).
+
+For setting up Discord or Telegram notifications, see the [setup folder](https://github.com/torikushiii/hoyolab-auto/tree/main/setup). Both webhook-based Discord and Telegram bot-token flows are documented there.
 
 ## Running with Docker
 
-This application can be easily managed and run using Docker. We provide a Makefile
-for convenience, but you can also use Docker commands directly.
+This application can be easily managed and run using Docker. We provide a [`Makefile`](Makefile) for convenience, but you can also use Docker commands directly.
 
 **1. Prerequisites**
 
@@ -187,10 +188,10 @@ You can configure your config using one of the following methods:
 
 **Important for Docker Users:**
 > [!NOTE]
-> When running with Docker, the cache file will be created inside the container at `/app/data/cache.json`. To persist cache data between container restarts, ensure the `data` directory is properly mounted as a volume (this is already configured in the provided `docker-compose.yml`).
-> If this is your first time running docker:
-> - Make sure your user is listed in the docker group, you can do so by running `sudo usermod -aG docker $USER`, logging out and back in
-> - From the project root, grant yourself perms to not have errors while accessing certain folders such as `data`. We can fix this by running `sudo chown -R $USER:$USER data logs && chmod -R 777 data logs`
+> When running with Docker, the cache file will be created inside the container at `/app/data/cache.json`. To persist cache data between container restarts, ensure the `data` directory is properly mounted as a volume (this is already configured in the provided [`docker-compose.yml`](docker-compose.yml)).
+> If this is your first time running Docker:
+> - Make sure your user is listed in the Docker group. You can do so by running `sudo usermod -aG docker $USER`, logging out, and back in.
+> - From the project root, grant yourself permission to avoid errors while accessing folders such as `data`. We can fix this by running `sudo chown -R $USER:$USER data logs && chmod -R 777 data logs`.
 
 **3. Building and Running with Docker Compose**
 
@@ -251,17 +252,15 @@ If you prefer not to use the Makefile, you can use the following Docker Compose 
   ```
 
 ## Contributing
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change. If there are any bugs, please open an issue.
 
-If you have any suggestions or ideas, feel free to open an issue.
+Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change. Bugs and ideas can also be reported through issues — every report helps.
 
-**New to contributing?**
-
-To get started, fork the repo, make your changes, add, commit, and push your changes to your fork. Then, open a pull request. If you're new to GitHub, [this tutorial](https://www.freecodecamp.org/news/how-to-make-your-first-pull-request-on-github-3#let-s-make-our-first-pull-request-) might help.
+**New to contributing?** To get started, fork the repo, make your changes, commit, and push them to your fork. Then open a pull request. If you're new to GitHub, [this tutorial](https://www.freecodecamp.org/news/how-to-make-your-first-pull-request-on-github-3#let-s-make-our-first-pull-request-) might help.
 
 You can support the project by giving it a star, sharing it with your friends, contributing to the project, and reporting any bugs you find.
 
 ## Buy Me a Coffee
+
 If this repo is useful to you, you can support me by buying me a coffee. Thank you!
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/torikushiii)
