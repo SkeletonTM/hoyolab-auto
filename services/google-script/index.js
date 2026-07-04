@@ -265,15 +265,8 @@ function flushDiscordNotifications () {
 const DEFAULT_CONSTANTS = {
 	genshin: {
 		ACT_ID: "e202102251931481",
-		successMessage: "Congratulations, Traveler! You have successfully checked in today~",
-		signedMessage: "Traveler, you've already checked in today~",
 		game: "Genshin Impact",
 		gameId: 2,
-		assets: {
-			author: "Paimon",
-			game: "Genshin Impact",
-			icon: "https://fastcdn.hoyoverse.com/static-resource-v2/2024/04/12/b700cce2ac4c68a520b15cafa86a03f0_2812765778371293568.png"
-		},
 		url: {
 			info: "https://sg-hk4e-api.hoyolab.com/event/sol/info",
 			home: "https://sg-hk4e-api.hoyolab.com/event/sol/home",
@@ -282,15 +275,8 @@ const DEFAULT_CONSTANTS = {
 	},
 	honkai: {
 		ACT_ID: "e202110291205111",
-		successMessage: "You have successfully checked in today, Captain~",
-		signedMessage: "You've already checked in today, Captain~",
 		game: "Honkai Impact 3rd",
 		gameId: 1,
-		assets: {
-			author: "Kiana",
-			game: "Honkai Impact 3rd",
-			icon: "https://fastcdn.hoyoverse.com/static-resource-v2/2024/02/29/3d96534fd7a35a725f7884e6137346d1_3942255444511793944.png"
-		},
 		url: {
 			info: "https://sg-public-api.hoyolab.com/event/mani/info",
 			home: "https://sg-public-api.hoyolab.com/event/mani/home",
@@ -299,15 +285,8 @@ const DEFAULT_CONSTANTS = {
 	},
 	starrail: {
 		ACT_ID: "e202303301540311",
-		successMessage: "You have successfully checked in today, Trailblazer~",
-		signedMessage: "You've already checked in today, Trailblazer~",
 		game: "Honkai: Star Rail",
 		gameId: 6,
-		assets: {
-			author: "PomPom",
-			game: "Honkai: Star Rail",
-			icon: "https://fastcdn.hoyoverse.com/static-resource-v2/2024/04/12/74330de1ee71ada37bbba7b72775c9d3_1883015313866544428.png"
-		},
 		url: {
 			info: "https://sg-public-api.hoyolab.com/event/luna/os/info",
 			home: "https://sg-public-api.hoyolab.com/event/luna/os/home",
@@ -316,15 +295,8 @@ const DEFAULT_CONSTANTS = {
 	},
 	zenless: {
 		ACT_ID: "e202406031448091",
-		successMessage: "Congratulations Proxy! You have successfully checked in today!~",
-		signedMessage: "You have already checked in today, Proxy!~",
 		game: "Zenless Zone Zero",
 		gameId: 8,
-		assets: {
-			author: "Eous",
-			game: "Zenless Zone Zero",
-			icon: "https://hyl-static-res-prod.hoyolab.com/communityweb/business/nap.png"
-		},
 		url: {
 			info: "https://sg-public-api.hoyolab.com/event/luna/zzz/os/info",
 			home: "https://sg-public-api.hoyolab.com/event/luna/zzz/os/home",
@@ -414,8 +386,6 @@ class Game {
 				success.push({
 					platform: this.name,
 					total: data.total + 1,
-					result: this.config.successMessage,
-					assets: { ...this.config.assets },
 					account: {
 						uid: accountDetails.uid,
 						nickname: accountDetails.nickname,
@@ -802,17 +772,6 @@ class Game {
 		redeemedCodes.push(code);
 		PropertiesService.getScriptProperties().setProperty(`${this.name}_redeemed_codes`, JSON.stringify(redeemedCodes));
 	}
-
-	delay (ms) {
-		Utilities.sleep(ms);
-	}
-}
-
-function setTimeout (func, timeout) {
-	if (timeout && timeout > 0) {
-		Utilities.sleep(timeout);
-	}
-	func();
 }
 
 function checkInGame (gameName) {
