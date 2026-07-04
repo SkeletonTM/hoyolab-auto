@@ -157,7 +157,8 @@ const NOTIFICATION_ICONS = {
 	warn: "⚠️",
 	error: "❌",
 	code: "🎁",
-	skip: "⏭️"
+	skip: "⏭️",
+	summary: "📊"
 };
 
 // Strip " (123456789)" trailing account-UIDs from any message.
@@ -589,6 +590,9 @@ class Game {
 	async redeemCodes (account) {
 		const codes = await this.fetchCodes();
 		const redeemedCodes = this.getRedeemedCodes();
+		let claimed = 0;
+		let skipped = 0;
+		let failed = 0;
 
 		logNotification("info", this.fullName, `Checking ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`);
 
@@ -596,6 +600,7 @@ class Game {
 			if (redeemedCodes.includes(code.code)) {
 				console.log(`Code ${code.code} already redeemed for ${this.fullName}`);
 				logNotification("skip", this.fullName, `Code ${code.code} already redeemed for ${account.nickname}`);
+				skipped++;
 				continue;
 			}
 
@@ -605,16 +610,22 @@ class Game {
 			if (result && result.success) {
 				this.saveRedeemedCode(code.code);
 				logNotification("code", this.fullName, `Code ${code.code} claimed for ${account.nickname} (${account.uid})`);
+				claimed++;
 			}
 			else {
 				logNotification("error", this.fullName, `Code ${code.code} failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`);
+				failed++;
 			}
 		}
+
+		logNotification("summary", this.fullName, `Promo codes for ${account.nickname}: ${claimed} claimed, ${skipped} skipped, ${failed} failed (of ${codes.length})`);
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
 	async forceRedeemCodes (account) {
 		const codes = await this.fetchCodes();
+		let claimed = 0;
+		let failed = 0;
 
 		logNotification("info", this.fullName, `Force-redeeming ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`);
 
@@ -625,11 +636,15 @@ class Game {
 
 			if (result && result.success) {
 				logNotification("code", this.fullName, `Code ${code.code} force-claimed for ${account.nickname} (${account.uid})`);
+				claimed++;
 			}
 			else {
 				logNotification("error", this.fullName, `Code ${code.code} force-redeem failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`);
+				failed++;
 			}
 		}
+
+		logNotification("summary", this.fullName, `Force-redeem for ${account.nickname}: ${claimed} claimed, ${failed} failed (of ${codes.length})`);
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
@@ -781,18 +796,28 @@ function checkInGame (gameName) {
 		.then(async (successes) => {
 			console.log(`Successful check-ins for ${gameName}:`, successes);
 
-			// Only attempt code redemption if enabled in config
-			if (config.enableCodeRedemption) {
-				for (const success of successes) {
-					if (gameName === "honkai") {
-						continue;
-					}
-
-					await game.redeemCodes(success.account);
-				}
-			}
-			else {
+			if (!config.enableCodeRedemption) {
 				console.log(`Code redemption is disabled in config for ${gameName}`);
+				return successes;
+			}
+
+			if (gameName === "honkai") {
+				return successes;
+			}
+
+			// If no new sign-ins happened, codes are NOT re-checked (this is
+			// documented upstream behaviour). Tell the user so the Discord
+			// message doesn't look like we forgot about codes.
+			if (successes.length === 0) {
+				const hasAccounts = Array.isArray(config[gameName]?.data) && config[gameName].data.length > 0;
+				if (hasAccounts) {
+					logNotification("info", gameName, "No new check-ins; promo codes not re-checked (run manuallyRedeemCodes() to force)");
+				}
+				return successes;
+			}
+
+			for (const success of successes) {
+				await game.redeemCodes(success.account);
 			}
 
 			return successes;
