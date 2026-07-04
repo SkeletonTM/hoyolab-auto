@@ -114,7 +114,7 @@ For Honkai Impact 3rd, code redemption is not supported by this script.
    - **Which deployment should run:** `Head`
    - **Select event source:** `Time-driven`
    - **Select type of time-based trigger:** `Day timer`
-   - **Select time of day:** your preferred local time (e.g. `8am – 9am`)
+   - **Select time of day:** see [Daily reset schedule](#daily-reset-schedule) below — pick **05:00–06:00 server time** for the latest region you play on, not your own morning.
 4. Save. Google will ask you to authorise the script to access external services and your script properties — accept.
 
 ### 6. Run it once manually
@@ -122,6 +122,39 @@ For Honkai Impact 3rd, code redemption is not supported by this script.
 Click the ▶ **Run** button with `checkInAllGames` selected in the toolbar. The first run will pop up an authorisation dialog — accept it. Open the **Executions** tab in the left sidebar to see logs and any errors.
 
 If you set `DISCORD_WEBHOOK`, you should see the report message arrive in Discord within a few seconds.
+
+## Daily reset schedule
+
+The daily check-in bonus for **all four supported games** (Genshin Impact, Honkai Impact 3rd, Honkai: Star Rail, Zenless Zone Zero) refreshes at the same wall-clock moment: **04:00 server time**. The reset is server-relative, not UTC-relative, so the actual UTC tick depends on which region your account is on.
+
+| Region | Server TZ | Reset in server time | Reset in UTC | Reset in Moscow (UTC+3) |
+|---|---|---|---|---|
+| **NA** (America) | UTC−5 (EST) / UTC−4 (EDT) | 04:00 | 09:00 (winter) / 08:00 (summer) | 12:00 (winter) / 11:00 (summer) |
+| **EU** (Europe) | UTC+1 (CET) / UTC+2 (CEST) | 04:00 | 03:00 (winter) / 02:00 (summer) | 06:00 (winter) / 05:00 (summer) |
+| **SEA** (Southeast Asia) | UTC+8 (SGT) | 04:00 | 20:00 (previous day, all year) | 23:00 (previous day, all year) |
+| **TW** (Taiwan / HK / MO) | UTC+8 (CST) | 04:00 | 20:00 (previous day, all year) | 23:00 (previous day, all year) |
+
+### How to find your region
+
+The cookie you pasted is tied to a specific region — that's the region the account was created on, and you can't change it later. To find out which one you have:
+
+1. Open the **Executions** tab in Apps Script after running `checkInAllGames` at least once.
+2. Click the latest successful run and open the logs.
+3. Look for a line like `Successful check-ins for genshin: [...]` — each entry's `region` field (one of `NA`, `EU`, `SEA`, `TW`) is your region for that game.
+
+Or, the easy way: just look at which one matches your in-game server name in the title screen.
+
+### Picking a trigger time
+
+The script's `sign()` call is a no-op if you've already signed in today (`is_sign` returns `true` from the API). So **any time after the reset works** — but you want a small buffer to absorb server clock drift and any DST transitions.
+
+Rule of thumb:
+
+- **One region:** set the trigger to **05:00–05:30 server time** in that region.
+- **Multiple regions:** set the trigger to **05:00–05:30 server time in the *latest* region** (i.e. the one whose reset fires last in your local timezone). The NA region (09:00 UTC) is almost always the last to reset; if you have any NA accounts, schedule around their reset.
+- **Just use UTC if you're not sure:** in winter, 09:30 UTC is safe for all four regions; in summer (Northern DST), 08:30 UTC is safe. Apps Script's trigger UI uses your account's timezone, so pick something like `5:00pm – 6:00pm` if your local timezone is UTC+8 (SEA / TW).
+
+You can also set **two triggers** if you have accounts in two non-overlapping resets and want each one signed in close to its reset (e.g. one at 04:00 SGT and another at 04:00 EST). The script is idempotent — extra runs just log `⏭️ Already signed in today`.
 
 ## What the script actually does
 
