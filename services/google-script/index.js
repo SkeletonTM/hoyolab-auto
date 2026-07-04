@@ -55,15 +55,15 @@ function viewAllRedeemedCodes () {
 
 const DISCORD_WEBHOOK = null; // Replace with your Discord webhook URL (optional)
 const DISCORD_USER_ID = ""; // Optional: Discord user ID to ping on errors (e.g. "123456789012345678")
-const CODE_SOURCE_MODE = "primary"; // "primary" (ennead -> humBao fallback) or "union" (merge both)
 
 // Promo-code data sources. Both return the current set of active codes for a
-// given game. Two are wired in: ennead.cc (torikushiii's aggregator, primary)
-// and Hum-Bao/hoyoverse-codes (GitHub-hosted txt files, open source). Each
-// source defines a URL builder and a parser; the fetch layer is the same.
+// given game. Two are wired in: ennead.cc (torikushiii's aggregator) and
+// Hum-Bao/hoyoverse-codes (GitHub-hosted txt files, open source). Each source
+// defines a URL builder and a parser; the fetch layer is the same.
 //
-// Adding a third source: append it to this object with the same shape and
-// the loop in fetchCodesPrimary() / fetchCodesUnion() picks it up.
+// fetchCodes() hits every source in CODE_SOURCE_ORDER in parallel and merges
+// the results, so adding a third source is just appending to CODE_SOURCES and
+// the order array.
 const CODE_SOURCES = {
 	ennead: {
 		name: "ennead (api.ennead.cc)",
@@ -96,8 +96,10 @@ const CODE_SOURCES = {
 	}
 };
 
-const CODE_SOURCE_ORDER_PRIMARY = ["ennead", "humBao"];
-const CODE_SOURCE_ORDER_UNION = ["ennead", "humBao"];
+// Order matters in the union: when the same code appears in multiple sources
+// we keep the first entry's metadata (e.g. `rewards` from ennead) and only
+// backfill from later sources if the earlier one was sparse.
+const CODE_SOURCE_ORDER = ["ennead", "humBao"];
 
 async function fetchFromSource (source, gameParam) {
 	const url = source.urlFor(gameParam);
@@ -109,36 +111,17 @@ async function fetchFromSource (source, gameParam) {
 	return source.parse(response.getContentText());
 }
 
-async function fetchCodesPrimary (gameParam) {
-	// Try ennead first; if it fails or returns an empty list, fall back to Hum-Bao.
-	// A successful empty list from ennead is still treated as success — it just means
-	// the aggregator believes there are no active codes for this game right now.
-	const errors = [];
-	for (const key of CODE_SOURCE_ORDER_PRIMARY) {
-		const source = CODE_SOURCES[key];
-		try {
-			const codes = await fetchFromSource(source, gameParam);
-			if (codes.length > 0) return { codes, source: key };
-			errors.push(`${source.name}: returned 0 codes`);
-		}
-		catch (e) {
-			errors.push(`${source.name}: ${e.message || e}`);
-		}
-	}
-	// All sources either failed or returned empty. The caller decides whether
-	// to surface this as an error to the user; here we just bubble up the list.
-	return { codes: [], errors };
-}
-
-async function fetchCodesUnion (gameParam) {
-	// Hit both sources in parallel, merge by code, prefer the first source's
-	// metadata (e.g. rewards from ennead) when the same code appears in both.
+async function fetchCodes (gameParam) {
+	// Hit every source in parallel, merge by code. A source that fails or
+	// returns 0 codes is logged but does not block the others. If all sources
+	// fail we return an empty array, matching the behaviour of the original
+	// single-source fetchCodes() so the caller sees the same shape.
 	const results = await Promise.allSettled(
-		CODE_SOURCE_ORDER_UNION.map(key => fetchFromSource(CODE_SOURCES[key], gameParam))
+		CODE_SOURCE_ORDER.map(key => fetchFromSource(CODE_SOURCES[key], gameParam))
 	);
 	const byCode = new Map();
 	const sourceHits = {};
-	CODE_SOURCE_ORDER_UNION.forEach((key, i) => {
+	CODE_SOURCE_ORDER.forEach((key, i) => {
 		const r = results[i];
 		if (r.status === "fulfilled") {
 			sourceHits[key] = r.value.length;
@@ -147,11 +130,8 @@ async function fetchCodesUnion (gameParam) {
 				if (!existing) {
 					byCode.set(entry.code, entry);
 				}
-				else {
-					// Backfill rewards from a secondary source if the primary was sparse.
-					if (!existing.rewards && entry.rewards) {
-						existing.rewards = entry.rewards;
-					}
+				else if (!existing.rewards && entry.rewards) {
+					existing.rewards = entry.rewards;
 				}
 			}
 		}
@@ -686,23 +666,12 @@ class Game {
 
 	async fetchCodes () {
 		const gameParam = this.getGameParam();
-		const mode = CODE_SOURCE_MODE;
 		try {
-			const result = mode === "union"
-				? await fetchCodesUnion(gameParam)
-				: await fetchCodesPrimary(gameParam);
-			if (mode === "union" && result.sourceHits) {
-				const hits = Object.entries(result.sourceHits)
-					.map(([k, v]) => `${k}=${v}`).join(", ");
-				console.log(`${this.fullName}:fetchCodes`, `union: ${hits}, total=${result.codes.length}`);
-			}
-			else if (mode === "primary" && result.source) {
-				console.log(`${this.fullName}:fetchCodes`, `primary: using ${result.source} (${result.codes.length} codes)`);
-			}
-			else if (mode === "primary" && result.errors?.length) {
-				console.warn(`${this.fullName}:fetchCodes`, `primary: all sources empty/failed: ${result.errors.join("; ")}`);
-			}
-			return result.codes;
+			const { codes, sourceHits } = await fetchCodes(gameParam);
+			const hits = Object.entries(sourceHits)
+				.map(([k, v]) => `${k}=${v}`).join(", ");
+			console.log(`${this.fullName}:fetchCodes`, `${hits} -> ${codes.length} unique`);
+			return codes;
 		}
 		catch (e) {
 			console.error(`${this.fullName}:fetchCodes`, `Error: ${e?.message || e}`);
