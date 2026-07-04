@@ -15,6 +15,7 @@ This is a fork of [torikushiii/hoyolab-auto](https://github.com/torikushiii/hoyo
 | `checkInAllGames()` flushes the buffer | ❌ | ✅ |
 | `manuallyRedeemCodes()` flushes the buffer | ❌ (had no notifications at all) | ✅ |
 | Files in the repo | 100+ (Node.js, Docker, …) | 5 |
+| Code source | `api.ennead.cc` (single source) | `api.ennead.cc` + [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) GitHub raw, with `primary` / `union` modes |
 
 ## Repository layout
 
@@ -104,6 +105,27 @@ If you ever need to force-redeem a code (e.g. the API didn't return it in time),
 - `redeemZenlessCodes(forceRedeem = true)` — Zenless Zone Zero
 
 For Honkai Impact 3rd, code redemption is not supported by this script.
+
+#### Code source: which API does the script call?
+
+The script pulls the list of currently-active promo codes from one of two community-maintained aggregators. You can switch between two strategies by editing `CODE_SOURCE_MODE` near the top of `index.js`:
+
+| Mode | Behaviour | Use when |
+|---|---|---|
+| `"primary"` (default) | Tries `api.ennead.cc` first; if that fails or returns 0 codes, falls back to the [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) GitHub raw txt files | You want the original single-source behaviour with a safety net |
+| `"union"` | Hits both sources in parallel and merges the results (deduplicated by code) | You want maximum coverage, including livestream codes one source may have missed |
+
+**What we measured on 2026-07-04 (4 July, ~04:00 UTC):**
+
+| Game | ennead active | Hum-Bao active | Union |
+|---|---|---|---|
+| Genshin Impact | 4 | 3 | 4 |
+| Honkai: Star Rail | 8 | 11 | 11 |
+| Zenless Zone Zero | 7 | 6 | 8 |
+
+Hum-Bao is also ~20× faster than `api.ennead.cc` (~12 ms vs ~300 ms cold, served from GitHub's raw CDN). The "primary" mode falls back to it automatically when ennead is unreachable or returns 0 codes; the "union" mode merges both lists (deduplicated by code, with `rewards` backfilled from whichever source has them). If you play multiple regions, prefer `"union"` — region-locked codes (e.g. `CODENAMEK` for Asia, `CBW0884678` for Asia) appear in one source but not the other, and a missed `❌` in the Discord report is cheaper than a missed Primogem.
+
+`api.ennead.cc` is torikushiii's personal aggregator on Cloudflare with no SLA; the Hum-Bao fallback is hosted on GitHub Pages / raw CDN, so a fallback is the more resilient path. Note that some codes returned by these sources are region-locked or already expired — the redemption API will simply return an error for those, and the script will log `❌` and move on. If you only play in one region, you can filter those out later by editing `redeemCodes()` to compare against your account's `account.region`.
 
 ### 5. Set up a daily trigger
 
