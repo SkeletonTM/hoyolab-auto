@@ -55,6 +55,112 @@ function viewAllRedeemedCodes () {
 
 const DISCORD_WEBHOOK = null; // Replace with your Discord webhook URL (optional)
 const DISCORD_USER_ID = ""; // Optional: Discord user ID to ping on errors (e.g. "123456789012345678")
+const CODE_SOURCE_MODE = "primary"; // "primary" (ennead -> humBao fallback) or "union" (merge both)
+
+// Promo-code data sources. Both return the current set of active codes for a
+// given game. Two are wired in: ennead.cc (torikushiii's aggregator, primary)
+// and Hum-Bao/hoyoverse-codes (GitHub-hosted txt files, open source). Each
+// source defines a URL builder and a parser; the fetch layer is the same.
+//
+// Adding a third source: append it to this object with the same shape and
+// the loop in fetchCodesPrimary() / fetchCodesUnion() picks it up.
+const CODE_SOURCES = {
+	ennead: {
+		name: "ennead (api.ennead.cc)",
+		urlFor: gameParam => {
+			if (!["genshin", "starrail", "zenless"].includes(gameParam)) {
+				throw new Error(`No ennead path for game "${gameParam}"`);
+			}
+			return `https://api.ennead.cc/mihoyo/${gameParam}/codes`;
+		},
+		parse: text => {
+			const data = JSON.parse(text);
+			if (!data || !Array.isArray(data.active)) {
+				throw new Error(`Unexpected payload: ${text.substring(0, 120)}`);
+			}
+			return data.active;
+		}
+	},
+	humBao: {
+		name: "Hum-Bao (github.com/Hum-Bao/hoyoverse-codes)",
+		urlFor: gameParam => {
+			const file = { genshin: "GENSHIN", starrail: "HSR", zenless: "ZZZ" }[gameParam];
+			if (!file) throw new Error(`No Hum-Bao file for game "${gameParam}"`);
+			return `https://raw.githubusercontent.com/Hum-Bao/hoyoverse-codes/main/${file}.txt`;
+		},
+		// txt format: one code per line, blank lines ignored, no header.
+		parse: text => text.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(line => /^[A-Z0-9]{4,}$/.test(line))
+			.map(code => ({ code }))
+	}
+};
+
+const CODE_SOURCE_ORDER_PRIMARY = ["ennead", "humBao"];
+const CODE_SOURCE_ORDER_UNION = ["ennead", "humBao"];
+
+async function fetchFromSource (source, gameParam) {
+	const url = source.urlFor(gameParam);
+	const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+	const code = response.getResponseCode();
+	if (code !== 200) {
+		throw new Error(`HTTP ${code}`);
+	}
+	return source.parse(response.getContentText());
+}
+
+async function fetchCodesPrimary (gameParam) {
+	// Try ennead first; if it fails or returns an empty list, fall back to Hum-Bao.
+	// A successful empty list from ennead is still treated as success — it just means
+	// the aggregator believes there are no active codes for this game right now.
+	const errors = [];
+	for (const key of CODE_SOURCE_ORDER_PRIMARY) {
+		const source = CODE_SOURCES[key];
+		try {
+			const codes = await fetchFromSource(source, gameParam);
+			if (codes.length > 0) return { codes, source: key };
+			errors.push(`${source.name}: returned 0 codes`);
+		}
+		catch (e) {
+			errors.push(`${source.name}: ${e.message || e}`);
+		}
+	}
+	// All sources either failed or returned empty. The caller decides whether
+	// to surface this as an error to the user; here we just bubble up the list.
+	return { codes: [], errors };
+}
+
+async function fetchCodesUnion (gameParam) {
+	// Hit both sources in parallel, merge by code, prefer the first source's
+	// metadata (e.g. rewards from ennead) when the same code appears in both.
+	const results = await Promise.allSettled(
+		CODE_SOURCE_ORDER_UNION.map(key => fetchFromSource(CODE_SOURCES[key], gameParam))
+	);
+	const byCode = new Map();
+	const sourceHits = {};
+	CODE_SOURCE_ORDER_UNION.forEach((key, i) => {
+		const r = results[i];
+		if (r.status === "fulfilled") {
+			sourceHits[key] = r.value.length;
+			for (const entry of r.value) {
+				const existing = byCode.get(entry.code);
+				if (!existing) {
+					byCode.set(entry.code, entry);
+				}
+				else {
+					// Backfill rewards from a secondary source if the primary was sparse.
+					if (!existing.rewards && entry.rewards) {
+						existing.rewards = entry.rewards;
+					}
+				}
+			}
+		}
+		else {
+			sourceHits[key] = `failed: ${r.reason?.message || r.reason}`;
+		}
+	});
+	return { codes: [...byCode.values()], sourceHits };
+}
 
 // Buffered notification messages. Each meaningful event appends a line here;
 // flushDiscordNotifications() sends the whole buffer as a single Discord message
@@ -580,15 +686,23 @@ class Game {
 
 	async fetchCodes () {
 		const gameParam = this.getGameParam();
-		const url = `https://api.ennead.cc/mihoyo/${gameParam}/codes`;
+		const mode = CODE_SOURCE_MODE;
 		try {
-			const response = await UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-			const text = response.getContentText();
-			const data = JSON.parse(text);
-			if (!data || !Array.isArray(data.active)) {
-				throw new Error(`Unexpected codes payload: ${text.substring(0, 200)}`);
+			const result = mode === "union"
+				? await fetchCodesUnion(gameParam)
+				: await fetchCodesPrimary(gameParam);
+			if (mode === "union" && result.sourceHits) {
+				const hits = Object.entries(result.sourceHits)
+					.map(([k, v]) => `${k}=${v}`).join(", ");
+				console.log(`${this.fullName}:fetchCodes`, `union: ${hits}, total=${result.codes.length}`);
 			}
-			return data.active;
+			else if (mode === "primary" && result.source) {
+				console.log(`${this.fullName}:fetchCodes`, `primary: using ${result.source} (${result.codes.length} codes)`);
+			}
+			else if (mode === "primary" && result.errors?.length) {
+				console.warn(`${this.fullName}:fetchCodes`, `primary: all sources empty/failed: ${result.errors.join("; ")}`);
+			}
+			return result.codes;
 		}
 		catch (e) {
 			console.error(`${this.fullName}:fetchCodes`, `Error: ${e?.message || e}`);
