@@ -127,12 +127,25 @@ If you set `DISCORD_WEBHOOK`, you should see the report message arrive in Discor
 
 The daily check-in bonus for **all four supported games** (Genshin Impact, Honkai Impact 3rd, Honkai: Star Rail, Zenless Zone Zero) refreshes at the same wall-clock moment: **04:00 server time**. The reset is server-relative, not UTC-relative, so the actual UTC tick depends on which region your account is on.
 
-| Region | Server TZ | Reset in server time | Reset in UTC | Reset in Moscow (UTC+3) |
+Times in the table below are in **standard time** (EST / CET — no DST applied). DST shifts are noted below the table.
+
+| Region | Server TZ | UTC | US (ET) | Moscow (UTC+3) | Japan (JST, UTC+9) |
+|---|---|---|---|---|---|
+| **NA** (America) | EST (UTC−5) | **09:00** | 04:00 | 12:00 | 18:00 |
+| **EU** (Europe) | CET (UTC+1) | **03:00** | 22:00 prev day | 06:00 | 12:00 |
+| **SEA** (Southeast Asia) | SGT (UTC+8) | **20:00** prev day | 15:00 prev day | 23:00 prev day | 05:00 next day |
+| **TW** (Taiwan / HK / MO) | CST (UTC+8) | **20:00** prev day | 15:00 prev day | 23:00 prev day | 05:00 next day |
+
+### DST shift (Northern Hemisphere summer)
+
+Between the 2nd Sunday of March and the 1st Sunday of November, US and EU clocks spring forward by one hour. The table values change as follows (SEA and TW are not affected — they have no DST):
+
+| Region | UTC | US (ET) | Moscow (UTC+3) | Japan (JST, UTC+9) |
 |---|---|---|---|---|
-| **NA** (America) | UTC−5 (EST) / UTC−4 (EDT) | 04:00 | 09:00 (winter) / 08:00 (summer) | 12:00 (winter) / 11:00 (summer) |
-| **EU** (Europe) | UTC+1 (CET) / UTC+2 (CEST) | 04:00 | 03:00 (winter) / 02:00 (summer) | 06:00 (winter) / 05:00 (summer) |
-| **SEA** (Southeast Asia) | UTC+8 (SGT) | 04:00 | 20:00 (previous day, all year) | 23:00 (previous day, all year) |
-| **TW** (Taiwan / HK / MO) | UTC+8 (CST) | 04:00 | 20:00 (previous day, all year) | 23:00 (previous day, all year) |
+| **NA** | 08:00 | 05:00 (EDT) | 11:00 | 17:00 |
+| **EU** | 02:00 | 22:00 prev day (EDT) | 05:00 | 11:00 |
+
+If your account is in the EU region, the EU reset happens **2 hours after** the SEA / TW reset in the same 24-hour day. If you have a NA account, the NA reset happens **6 hours after** the SEA / TW reset on the *next* calendar day (i.e. 26 hours after SEA / TW reset if you look at absolute UTC time).
 
 ### How to find your region
 
@@ -146,15 +159,18 @@ Or, the easy way: just look at which one matches your in-game server name in the
 
 ### Picking a trigger time
 
-The script's `sign()` call is a no-op if you've already signed in today (`is_sign` returns `true` from the API). So **any time after the reset works** — but you want a small buffer to absorb server clock drift and any DST transitions.
+The script's `sign()` call is a no-op if you've already signed in today (`is_sign` returns `true` from the API). So **any time after the reset works** — but you want a small buffer to absorb server clock drift.
 
-Rule of thumb:
+Rule of thumb: schedule the trigger for **05:00 server time** in the region you play on (or in the **latest** region, if you have multiple).
 
-- **One region:** set the trigger to **05:00–05:30 server time** in that region.
-- **Multiple regions:** set the trigger to **05:00–05:30 server time in the *latest* region** (i.e. the one whose reset fires last in your local timezone). The NA region (09:00 UTC) is almost always the last to reset; if you have any NA accounts, schedule around their reset.
-- **Just use UTC if you're not sure:** in winter, 09:30 UTC is safe for all four regions; in summer (Northern DST), 08:30 UTC is safe. Apps Script's trigger UI uses your account's timezone, so pick something like `5:00pm – 6:00pm` if your local timezone is UTC+8 (SEA / TW).
+Concrete recipes in UTC:
 
-You can also set **two triggers** if you have accounts in two non-overlapping resets and want each one signed in close to its reset (e.g. one at 04:00 SGT and another at 04:00 EST). The script is idempotent — extra runs just log `⏭️ Already signed in today`.
+- **NA only:** `09:30 UTC` (winter) / `08:30 UTC` (summer, DST) — also equals `04:30 EST` / `05:30 EDT` / `12:30 MSK` / `18:30 JST` (winter)
+- **EU only:** `03:30 UTC` (winter) / `02:30 UTC` (summer) — also equals `04:30 CET` / `04:30 CEST` / `06:30 MSK` / `12:30 JST` (winter)
+- **SEA / TW only:** `20:30 UTC` — also equals `04:30 SGT` / `04:30 CST` / `23:30 MSK` (previous day) / `05:30 JST` (next day)
+- **All four regions:** `09:30 UTC` is safe in winter; `08:30 UTC` in summer. NA reset is always the last one to fire, so scheduling for NA's reset covers everything.
+
+You can also set **two triggers** if you want each region to be picked up as close to its reset as possible. The script is idempotent — extra runs just log `⏭️ Already signed in today`.
 
 ## What the script actually does
 
