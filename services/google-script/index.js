@@ -316,6 +316,7 @@ class Game {
 		this.fullName = DEFAULT_CONSTANTS[name].game; // Get full name from constants
 		this.config = { ...DEFAULT_CONSTANTS[name], ...config.config };
 		this.data = config.data || [];
+		this._codesCache = null; // Per-run cache for fetchCodes()
 
 		if (this.data.length === 0) {
 			console.warn(`No ${this.fullName} accounts provided. Skipping...`);
@@ -346,13 +347,6 @@ class Game {
 					continue;
 				}
 
-				const awardsData = await this.getAwardsData(cookie);
-				if (!awardsData.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`);
-					continue;
-				}
-
-				const awards = awardsData.data;
 				const data = {
 					total: info.data.total,
 					today: info.data.today,
@@ -363,6 +357,14 @@ class Game {
 					logNotification("skip", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Already signed in today (total: ${data.total})`);
 					continue;
 				}
+
+				const awardsData = await this.getAwardsData(cookie);
+				if (!awardsData.success) {
+					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`);
+					continue;
+				}
+
+				const awards = awardsData.data;
 
 				const totalSigned = data.total;
 				const awardObject = {
@@ -650,12 +652,15 @@ class Game {
 	}
 
 	async fetchCodes () {
+		if (this._codesCache) return this._codesCache;
+
 		const gameParam = this.getGameParam();
 		try {
 			const { codes, sourceHits } = await fetchCodes(gameParam);
 			const hits = Object.entries(sourceHits)
 				.map(([k, v]) => `${k}=${v}`).join(", ");
 			console.log(`${this.fullName}:fetchCodes`, `${hits} -> ${codes.length} unique`);
+			if (codes.length > 0) this._codesCache = codes;
 			return codes;
 		}
 		catch (e) {
@@ -917,14 +922,14 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 	});
 }
 
-function redeemGenshinCodes () {
-	return manuallyRedeemCodes("genshin", false);
+function redeemGenshinCodes (forceRedeem = false) {
+	return manuallyRedeemCodes("genshin", forceRedeem);
 }
 
-function redeemStarRailCodes () {
-	return manuallyRedeemCodes("starrail", false);
+function redeemStarRailCodes (forceRedeem = false) {
+	return manuallyRedeemCodes("starrail", forceRedeem);
 }
 
-function redeemZenlessCodes () {
-	return manuallyRedeemCodes("zenless", false);
+function redeemZenlessCodes (forceRedeem = false) {
+	return manuallyRedeemCodes("zenless", forceRedeem);
 }
