@@ -48,6 +48,7 @@ In the same editor, scroll to the top of the file. You'll see:
 ```javascript
 const config = {
 	enableCodeRedemption: false, // set to true once everything else works
+	redeemCodesEvenIfSignedIn: false, // true = also redeem codes for accounts already signed in today
 	genshin:  { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
 	honkai:   { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
 	starrail: { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
@@ -98,6 +99,14 @@ enableCodeRedemption: true,
 
 This will additionally call `redeemCodes()` for each account that just signed in. Codes you've already redeemed are remembered in Apps Script's `PropertiesService`, so they will not be claimed twice.
 
+If you want codes checked for **all** accounts on every run — even when everyone is already signed in (e.g. you run the script twice a day, or a limited-time livestream code drops after the morning check-in) — also set:
+
+```javascript
+redeemCodesEvenIfSignedIn: true,
+```
+
+With that on, "already signed in" accounts are still skipped for check-in but are included in code redemption. Codes the API reports as already redeemed (`retcode -2017/-2018`) or expired (`-2001/-2003`) are logged as skips/warnings, not errors, and remembered so they're never retried.
+
 If you ever need to force-redeem a code (e.g. the API didn't return it in time), pick one of these functions in the toolbar and run it once:
 
 - `redeemGenshinCodes(forceRedeem = true)` — Genshin
@@ -123,7 +132,7 @@ Why two? `api.ennead.cc` is one person's Cloudflare project with no SLA; the Git
 | Honkai: Star Rail | 8 | 11 | 11 |
 | Zenless Zone Zero | 7 | 6 | 8 |
 
-Note that some codes returned by these sources are region-locked or already expired — the redemption API will simply return an error for those, and the script will log `❌` and move on. If you only play in one region, you can filter those out later by editing `redeemCodes()` to compare against your account's `account.region`.
+Note that some codes returned by these sources are region-locked or already expired — the redemption API returns a dedicated retcode for those (`-2001`/`-2003`), and the script logs them as ⚠️ skips rather than ❌ errors. If you only play in one region, you can filter those out later by editing `redeemCodes()` to compare against your account's `account.region`.
 
 To add a third source, append a new entry to the `CODE_SOURCES` table at the top of `index.js` and to the `CODE_SOURCE_ORDER` array right below it. Each entry is `{ name, urlFor(gameParam) → string, parse(text) → [{code, rewards?}] }`.
 
@@ -217,6 +226,9 @@ You can also set **two triggers** if you want each region to be picked up as clo
 - Check the **Executions** tab in Apps Script for a `flushDiscordNotifications` error.
 - Make sure `NOTIFICATIONS.length > 0`. If every account was already signed in *and* there are no code events and no errors, the buffer is empty and the script deliberately sends nothing.
 
+**The report says "Cookie is missing ltuid/ltuid_v2".**
+The cookie string you pasted doesn't contain an `ltuid` or `ltuid_v2` field — usually a partial copy or an expired login. Re-grab the full cookie following step 2 (from the `getGameRecordCard` request), making sure you copy the entire `cookie` header value.
+
 **I get `Error: undefined` in the report.**
 This is what the script writes when the underlying error has no `.message` field. Look at the surrounding text (e.g. `Failed to fetch promo codes: undefined`) — the function name usually tells you which API call failed. The full error is also in the **Executions** tab.
 
@@ -224,7 +236,7 @@ This is what the script writes when the underlying error has no `.message` field
 Your cookie has expired. Repeat step 2 to grab a fresh one. The error message in the report includes the exact `retcode` and the API's own message.
 
 **My account was already signed in and codes weren't claimed.**
-This is the original upstream behaviour and we didn't change it: in `checkInAllGames`, code redemption only runs for accounts that *just* signed in. If everything was already signed in for the day, use `redeemGenshinCodes(true)` / `redeemStarRailCodes(true)` / `redeemZenlessCodes(true)` from the toolbar to force it.
+By default, code redemption in `checkInAllGames` only runs for accounts that *just* signed in (upstream behaviour). Two ways around it: set `redeemCodesEvenIfSignedIn: true` in the config to always check codes for every account, or use `redeemGenshinCodes(true)` / `redeemStarRailCodes(true)` / `redeemZenlessCodes(true)` from the toolbar to force a one-off run.
 
 ## License
 

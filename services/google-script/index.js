@@ -1,5 +1,9 @@
 const config = {
 	enableCodeRedemption: false, // Set to true to enable automatic code redemption
+	// If true, promo codes are checked for ALL accounts on every run, even
+	// those that were already signed in today. If false (default), codes are
+	// only redeemed for accounts that just signed in (upstream behaviour).
+	redeemCodesEvenIfSignedIn: false,
 	genshin: {
 		data: [
 			// "account_cookie_1",
@@ -142,14 +146,21 @@ async function fetchCodes (gameParam) {
 	return { codes: [...byCode.values()], sourceHits };
 }
 
-// Buffered notification messages. Each meaningful event appends a line here;
-// flushDiscordNotifications() sends the whole buffer as a single Discord message
-// at the end of a run. This is the architectural fix for:
-//   - no notification when an account is already signed in (success[] was empty)
-//   - no notification for code redemption (the previous webhook was check-in only)
-//   - no notification for errors
-//   - N webhook POSTs per run instead of one
+// Buffered notification messages. checkInGame() collects lines into a
+// per-game buffer so concurrent games never interleave and a flush triggered
+// by one game's failure can't steal another game's pending lines; buffers are
+// merged into NOTIFICATIONS right before flushDiscordNotifications().
 const NOTIFICATIONS = [];
+
+// Retcodes from the cdkey redemption API that mean "this code is already
+// redeemed on this account" — a normal, expected outcome, not an error.
+// Verified against torikushiii/hoyolab-auto (node) and
+// hashblen/hoyo-redeem-codes-script (independent GAS implementation).
+const REDEEM_RETCODE_ALREADY_USED = [-2017, -2018];
+
+// Retcodes meaning "code expired or never existed" — report as a warning,
+// not as a scary error line.
+const REDEEM_RETCODE_EXPIRED_OR_INVALID = [-2001, -2003];
 
 const NOTIFICATION_ICONS = {
 	info: "ℹ️",
@@ -162,15 +173,17 @@ const NOTIFICATION_ICONS = {
 };
 
 // Strip " (123456789)" trailing account-UIDs from any message.
-// HoYoLAB game_role_id is always a 7-10 digit number and is the only
-// place in the codebase where "(<digits>)" is appended to a nickname.
-const UID_PAREN_RE = /\s+\(\d+\)/g;
+// HoYoLAB game_role_id is a 7-10 digit number; the {7,10} bound keeps
+// legitimate parenthesised numbers in nicknames (e.g. "Alice (2)") intact.
+const UID_PAREN_RE = /\s+\(\d{7,10}\)/g;
 
-function logNotification (level, gameName, message) {
+// Routes a line either into the shared NOTIFICATIONS buffer (legacy callers)
+// or into a per-game buffer when one is supplied by checkInGame().
+function logNotification (level, gameName, message, buffer) {
 	const icon = NOTIFICATION_ICONS[level] || "ℹ️";
 	const prefix = gameName ? `[${gameName}]` : "";
 	const cleaned = message.replace(UID_PAREN_RE, "");
-	NOTIFICATIONS.push(`${icon} ${prefix} ${cleaned}`.trim());
+	(buffer || NOTIFICATIONS).push(`${icon} ${prefix} ${cleaned}`.trim());
 }
 
 // Voice lines for the Discord message wrapper, in the style of Ju Fufu
@@ -306,6 +319,14 @@ const DEFAULT_CONSTANTS = {
 	}
 };
 
+// Extracts the ltuid from a HoYoLAB cookie string. Returns null instead of
+// throwing a confusing TypeError when the cookie is stale or mis-pasted —
+// this is the single most common setup failure for this script.
+function extractLtuid (cookie) {
+	const m = String(cookie).match(/ltuid(?:_v2)?=([^;]+)/);
+	return m ? m[1] : null;
+}
+
 class Game {
 	/**
      * @param {string} name - The short name of the game (e.g., "genshin").
@@ -317,6 +338,7 @@ class Game {
 		this.config = { ...DEFAULT_CONSTANTS[name], ...config.config };
 		this.data = config.data || [];
 		this._codesCache = null; // Per-run cache for fetchCodes()
+		this._recordCardCache = new Map(); // ltuid -> raw record-card payload
 
 		if (this.data.length === 0) {
 			console.warn(`No ${this.fullName} accounts provided. Skipping...`);
@@ -324,26 +346,30 @@ class Game {
 		}
 	}
 
-	async checkAndExecute () {
+	async checkAndExecute (buffer) {
 		const accounts = this.data;
 		if (accounts.length === 0) {
-			logNotification("warn", this.fullName, "No active accounts found");
+			logNotification("warn", this.fullName, "No active accounts found", buffer);
 			return [];
 		}
 
 		const success = [];
 		for (const cookie of accounts) {
 			try {
-				const ltuid = cookie.match(/ltuid(?:|_v2)=([^;]+)/)[1];
+				const ltuid = extractLtuid(cookie);
+				if (!ltuid) {
+					logNotification("error", this.fullName, "Cookie is missing ltuid/ltuid_v2 — grab a fresh cookie (see README step 2)", buffer);
+					continue;
+				}
 				const accountDetails = await this.getAccountDetails(cookie, ltuid);
 				if (!accountDetails) {
-					logNotification("error", this.fullName, `Failed to get account details for ltuid ${ltuid}`);
+					logNotification("error", this.fullName, `Failed to get account details for ltuid ${ltuid}`, buffer);
 					continue;
 				}
 
 				const info = await this.getSignInfo(cookie);
 				if (!info.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get sign info`);
+					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get sign info`, buffer);
 					continue;
 				}
 
@@ -354,28 +380,50 @@ class Game {
 				};
 
 				if (data.isSigned) {
-					logNotification("skip", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Already signed in today (total: ${data.total})`);
+					logNotification("skip", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Already signed in today (total: ${data.total})`, buffer);
+					// Optionally still redeem codes for already-signed-in accounts
+					// (config.redeemCodesEvenIfSignedIn). The account entry is
+					// pushed to `success` marked with alreadySigned so the
+					// caller can tell it apart from a fresh check-in.
+					if (config.redeemCodesEvenIfSignedIn && this.name !== "honkai") {
+						success.push({
+							platform: this.name,
+							alreadySigned: true,
+							account: {
+								uid: accountDetails.uid,
+								nickname: accountDetails.nickname,
+								rank: accountDetails.rank,
+								region: accountDetails.region,
+								cookie
+							}
+						});
+					}
 					continue;
 				}
 
 				const awardsData = await this.getAwardsData(cookie);
 				if (!awardsData.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`);
+					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`, buffer);
 					continue;
 				}
 
 				const awards = awardsData.data;
 
 				const totalSigned = data.total;
-				const awardObject = {
-					name: awards[totalSigned].name,
-					count: awards[totalSigned].cnt,
-					icon: awards[totalSigned].icon
-				};
+				// total_sign_day is normally the index of today's award, but guard
+				// against any month-length surprise instead of crashing on undefined.
+				const awardEntry = awards[totalSigned] || awards[totalSigned % awards.length] || null;
+				const awardObject = awardEntry
+					? {
+						name: awardEntry.name,
+						count: awardEntry.cnt,
+						icon: awardEntry.icon
+					}
+					: { name: "Unknown reward", count: 0, icon: "" };
 
 				const sign = await this.sign(cookie);
 				if (!sign.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in API call failed`);
+					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in API call failed`, buffer);
 					continue;
 				}
 
@@ -384,7 +432,7 @@ class Game {
 					`Today's Reward: ${awardObject.name} x${awardObject.count}`
 				);
 
-				logNotification("success", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Got ${awardObject.name} x${awardObject.count} (total: ${data.total + 1})`);
+				logNotification("success", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Got ${awardObject.name} x${awardObject.count} (total: ${data.total + 1})`, buffer);
 
 				success.push({
 					platform: this.name,
@@ -401,29 +449,36 @@ class Game {
 			}
 			catch (e) {
 				console.error(`${this.fullName}:CheckIn`, e);
-				logNotification("error", this.fullName, `Unexpected error: ${e?.message || String(e)}`);
+				logNotification("error", this.fullName, `Unexpected error: ${e?.message || String(e)}`, buffer);
 			}
-		}
+			}
 
-		return success;
-	}
+			return success;
+			}
 
-	async getAccountDetails (cookieData, ltuid) {
-		try {
-			const options = {
-				method: "GET",
-				headers: {
-					"User-Agent": this.userAgent,
-					Cookie: cookieData
+			// The record-card endpoint returns every game profile for the account in one
+			// response; cache it per ltuid for the duration of this run so multi-game
+			// accounts don't trigger one extra request per game.
+			async getAccountDetails (cookieData, ltuid) {
+			try {
+			let data = this._recordCardCache.get(ltuid);
+			if (!data) {
+				const options = {
+					method: "GET",
+					headers: {
+						"User-Agent": this.userAgent,
+						Cookie: cookieData
+					}
+				};
+
+				const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
+				const response = await UrlFetchApp.fetch(url, options);
+				data = JSON.parse(response.getContentText());
+
+				if (response.getResponseCode() !== 200 || data.retcode !== 0) {
+					throw new Error(`Failed to login to ${this.fullName} account: ${JSON.stringify(data)}`);
 				}
-			};
-
-			const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
-			const response = await UrlFetchApp.fetch(url, options);
-			const data = JSON.parse(response.getContentText());
-
-			if (response.getResponseCode() !== 200 || data.retcode !== 0) {
-				throw new Error(`Failed to login to ${this.fullName} account: ${JSON.stringify(data)}`);
+				this._recordCardCache.set(ltuid, data);
 			}
 
 			const accountData = data.data.list.find(account => account.game_id === this.config.gameId);
@@ -437,12 +492,12 @@ class Game {
 				rank: accountData.level,
 				region: this.fixRegion(accountData.region)
 			};
-		}
-		catch (e) {
+			}
+			catch (e) {
 			console.error(`${this.fullName}:login`, `Error: ${e?.message || String(e)}`);
 			throw e; // Re-throw to be handled by the caller
-		}
-	}
+			}
+			}
 
 	async sign (cookieData) {
 		try {
@@ -589,69 +644,104 @@ class Game {
 		return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 	}
 
-	async redeemCodes (account) {
-		const codes = await this.fetchCodes();
+	async redeemCodes (account, buffer) {
+		const codes = await this.fetchCodes(buffer);
 		const redeemedCodes = this.getRedeemedCodes();
 		let claimed = 0;
 		let skipped = 0;
 		let failed = 0;
 
-		logNotification("info", this.fullName, `Checking ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`);
+		logNotification("info", this.fullName, `Checking ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`, buffer);
 
-		for (const code of codes) {
+		for (let i = 0; i < codes.length; i++) {
+			const code = codes[i];
 			if (redeemedCodes.includes(code.code)) {
 				console.log(`Code ${code.code} already redeemed for ${this.fullName}`);
-				logNotification("skip", this.fullName, `Code ${code.code} already redeemed for ${account.nickname}`);
+				logNotification("skip", this.fullName, `Code ${code.code} already redeemed for ${account.nickname}`, buffer);
 				skipped++;
 				continue;
 			}
 
 			const result = await this.redeemCode(account, code.code);
-			Utilities.sleep(6000);
+			// Rate-limit pause between redemption calls — but never after the
+			// final code, where it would just add 6 dead seconds to the run.
+			if (i < codes.length - 1) {
+				Utilities.sleep(6000);
+			}
 
 			if (result && result.success) {
 				this.saveRedeemedCode(code.code);
-				logNotification("code", this.fullName, `Code ${code.code} claimed for ${account.nickname} (${account.uid})`);
+				logNotification("code", this.fullName, `Code ${code.code} claimed for ${account.nickname} (${account.uid})`, buffer);
 				claimed++;
 			}
+			else if (result && result.alreadyUsed) {
+				// Server says the code was already redeemed — remember it so we
+				// never try it again, and report as a skip rather than an error.
+				this.saveRedeemedCode(code.code);
+				logNotification("skip", this.fullName, `Code ${code.code} already redeemed on ${account.nickname}'s account`, buffer);
+				skipped++;
+			}
+			else if (result && result.expired) {
+				logNotification("warn", this.fullName, `Code ${code.code} expired or invalid (skipped for ${account.nickname})`, buffer);
+				skipped++;
+			}
 			else {
-				logNotification("error", this.fullName, `Code ${code.code} failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`);
+				logNotification("error", this.fullName, `Code ${code.code} failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`, buffer);
 				failed++;
 			}
 		}
 
-		logNotification("summary", this.fullName, `Promo codes for ${account.nickname}: ${claimed} claimed, ${skipped} skipped, ${failed} failed (of ${codes.length})`);
+		logNotification("summary", this.fullName, `Promo codes for ${account.nickname}: ${claimed} claimed, ${skipped} skipped, ${failed} failed (of ${codes.length})`, buffer);
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
-	async forceRedeemCodes (account) {
-		const codes = await this.fetchCodes();
+	async forceRedeemCodes (account, buffer) {
+		const codes = await this.fetchCodes(buffer);
 		let claimed = 0;
+		let skipped = 0;
 		let failed = 0;
 
-		logNotification("info", this.fullName, `Force-redeeming ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`);
+		logNotification("info", this.fullName, `Force-redeeming ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`, buffer);
 
-		for (const code of codes) {
+		for (let i = 0; i < codes.length; i++) {
+			const code = codes[i];
 			console.log(`Attempting to redeem code ${code.code} for ${this.fullName}`);
 			const result = await this.redeemCode(account, code.code);
-			Utilities.sleep(6000);
+			if (i < codes.length - 1) {
+				Utilities.sleep(6000);
+			}
 
 			if (result && result.success) {
-				logNotification("code", this.fullName, `Code ${code.code} force-claimed for ${account.nickname} (${account.uid})`);
+				// Keep the local redeemed-list in sync so a normal run tomorrow
+				// doesn't retry codes the force-run already claimed.
+				this.saveRedeemedCode(code.code);
+				logNotification("code", this.fullName, `Code ${code.code} force-claimed for ${account.nickname} (${account.uid})`, buffer);
 				claimed++;
 			}
+			else if (result && result.alreadyUsed) {
+				this.saveRedeemedCode(code.code);
+				logNotification("skip", this.fullName, `Code ${code.code} already redeemed on ${account.nickname}'s account`, buffer);
+				skipped++;
+			}
+			else if (result && result.expired) {
+				logNotification("warn", this.fullName, `Code ${code.code} expired or invalid (skipped for ${account.nickname})`, buffer);
+				skipped++;
+			}
 			else {
-				logNotification("error", this.fullName, `Code ${code.code} force-redeem failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`);
+				logNotification("error", this.fullName, `Code ${code.code} force-redeem failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`, buffer);
 				failed++;
 			}
 		}
 
-		logNotification("summary", this.fullName, `Force-redeem for ${account.nickname}: ${claimed} claimed, ${failed} failed (of ${codes.length})`);
+		logNotification("summary", this.fullName, `Force-redeem for ${account.nickname}: ${claimed} claimed, ${skipped} skipped, ${failed} failed (of ${codes.length})`, buffer);
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
 
-	async fetchCodes () {
+	async fetchCodes (buffer) {
+		// Cache even an empty result: if both sources returned 0 codes (or the
+		// fetch failed and the caller already logged an error), there is no
+		// point re-hitting the same URLs for every account of this game.
 		if (this._codesCache) return this._codesCache;
 
 		const gameParam = this.getGameParam();
@@ -660,12 +750,13 @@ class Game {
 			const hits = Object.entries(sourceHits)
 				.map(([k, v]) => `${k}=${v}`).join(", ");
 			console.log(`${this.fullName}:fetchCodes`, `${hits} -> ${codes.length} unique`);
-			if (codes.length > 0) this._codesCache = codes;
+			this._codesCache = codes;
 			return codes;
 		}
 		catch (e) {
 			console.error(`${this.fullName}:fetchCodes`, `Error: ${e?.message || e}`);
-			logNotification("error", this.fullName, `Failed to fetch promo codes: ${e?.message || e}`);
+			logNotification("error", this.fullName, `Failed to fetch promo codes: ${e?.message || e}`, buffer);
+			this._codesCache = [];
 			return [];
 		}
 	}
@@ -699,6 +790,18 @@ class Game {
 					const msg = `Authentication error: ${data.message}. Try logging in via incognito mode and get a fresh cookie from there.`;
 					console.error(`Authentication error for code ${code} in ${this.fullName}: ${data.message}. Try logging in via incognito mode and get a fresh cookie from there.`);
 					return { success: false, message: msg };
+				}
+				// Benign outcomes: code already used on this account, or code
+				// expired/never valid. Callers report these as skip/warn, never
+				// as errors. Retcode values cross-checked against
+				// torikushiii/hoyolab-auto (node) and hashblen's GAS version.
+				if (REDEEM_RETCODE_ALREADY_USED.includes(data.retcode)) {
+					console.log(`Code ${code} already used for ${this.fullName} (retcode ${data.retcode})`);
+					return { success: false, alreadyUsed: true, message: data.message || "Already redeemed" };
+				}
+				if (REDEEM_RETCODE_EXPIRED_OR_INVALID.includes(data.retcode)) {
+					console.log(`Code ${code} expired/invalid for ${this.fullName} (retcode ${data.retcode})`);
+					return { success: false, expired: true, message: data.message || "Expired or invalid code" };
 				}
 				console.error(`Code ${code} redemption failed for ${this.fullName}:`, data);
 				return { success: false, message: data.message || `retcode ${data.retcode}` };
@@ -796,18 +899,22 @@ class Game {
 
 function checkInGame (gameName) {
 	const game = new Game(gameName, config[gameName]);
+	// Per-game notification buffer: games run concurrently via Promise.all in
+	// checkInAllGames, and writing into one shared array would interleave lines
+	// and let a failure-triggered flush steal another game's pending messages.
+	const buffer = [];
 
-	return game.checkAndExecute()
+	return game.checkAndExecute(buffer)
 		.then(async (successes) => {
 			console.log(`Successful check-ins for ${gameName}:`, successes);
 
 			if (!config.enableCodeRedemption) {
 				console.log(`Code redemption is disabled in config for ${gameName}`);
-				return successes;
+				return { successes, buffer };
 			}
 
 			if (gameName === "honkai") {
-				return successes;
+				return { successes, buffer };
 			}
 
 			// If no new sign-ins happened, codes are NOT re-checked (this is
@@ -816,20 +923,23 @@ function checkInGame (gameName) {
 			if (successes.length === 0) {
 				const hasAccounts = Array.isArray(config[gameName]?.data) && config[gameName].data.length > 0;
 				if (hasAccounts) {
-					logNotification("info", gameName, "No new check-ins; promo codes not re-checked (run manuallyRedeemCodes() to force)");
+					logNotification("info", gameName, "No new check-ins; promo codes not re-checked (run manuallyRedeemCodes() to force)", buffer);
 				}
-				return successes;
+				return { successes, buffer };
 			}
 
 			for (const success of successes) {
-				await game.redeemCodes(success.account);
+				await game.redeemCodes(success.account, buffer);
 			}
 
-			return successes;
+			return { successes, buffer };
 		})
 		.catch((e) => {
 			console.error(`An error occurred during ${gameName} check-in:`, e);
-			logNotification("error", gameName, `Unhandled error: ${e?.message || String(e)}`);
+			logNotification("error", gameName, `Unhandled error: ${e?.message || String(e)}`, buffer);
+			// Attach the buffer so the caller can still report what this game
+			// managed to log before failing, then re-throw.
+			e.notificationBuffer = buffer;
 			throw e;
 		});
 }
@@ -839,15 +949,30 @@ function checkInAllGames () {
 
 	NOTIFICATIONS.length = 0;
 
-	return Promise.all(games.map(checkInGame))
+	return Promise.allSettled(games.map(checkInGame))
 		.then((results) => {
+			// Merge per-game buffers in stable game order (not completion order).
+			for (const r of results) {
+				if (r.status === "fulfilled") {
+					NOTIFICATIONS.push(...r.value.buffer);
+				}
+				else if (r.reason && Array.isArray(r.reason.notificationBuffer)) {
+					NOTIFICATIONS.push(...r.reason.notificationBuffer);
+				}
+			}
+
+			const failures = results.filter(r => r.status === "rejected");
+			if (failures.length > 0) {
+				console.error("Error during check-in process:", failures[0].reason);
+				flushDiscordNotifications();
+				// Re-throw so the Apps Script Executions tab marks this run as
+				// FAILED instead of a misleading "Completed".
+				throw failures[0].reason;
+			}
+
 			console.log("All games checked in successfully");
 			flushDiscordNotifications();
-			return results.flat();
-		})
-		.catch((e) => {
-			console.error("Error during check-in process:", e);
-			flushDiscordNotifications();
+			return results.flatMap(r => r.value ? r.value.successes : []);
 		});
 }
 
@@ -886,7 +1011,11 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 
 	return Promise.all(accounts.map(async (cookieData) => {
 		try {
-			const ltuid = cookieData.match(/ltuid(?:|_v2)=([^;]+)/)[1];
+			const ltuid = extractLtuid(cookieData);
+			if (!ltuid) {
+				logNotification("error", gameName, "Cookie is missing ltuid/ltuid_v2 — grab a fresh cookie (see README step 2)");
+				return { success: false, message: `Invalid cookie for ${gameName}: no ltuid` };
+			}
 			const accountDetails = await game.getAccountDetails(cookieData, ltuid);
 
 			if (!accountDetails) {
