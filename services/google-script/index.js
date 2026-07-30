@@ -187,32 +187,104 @@ function logNotification (level, gameName, message, buffer) {
 }
 
 // Voice lines for the Discord message wrapper, in the style of Ju Fufu
-// (橘福福 / "Фу-фу" — the tiger-agent Cunning Hare from Zenless Zone Zero).
-// Phrases are Russian with her characteristic "фу-фу-фу" purring and
-// maternal pet-names ("малыш", "зайка", "солнышко").
-const JU_FUFU_INTROS = [
-	"Фу-фу-фу~ Семейный отчёт на связи! 🐯",
-	"Мур-мур~ Заходи, посидим вместе~ 🐾",
-	"Ням-ням~ Очередной день, очередной отчёт~",
-	"Тигрёнок пришёл с проверкой~ Фу-фу-фу!",
-	"Хи-хи, снова за работой~ Готова послушать~ 🐯"
-];
-
-const JU_FUFU_OUTROS_OK = [
-	"Хорошего дня, солнышко~ 🐾",
-	"Фу-фу-фу, до завтра~",
-	"Береги себя, малыш~ 🐯",
-	"Мур-мур, всё будет хорошо~"
-];
-
-const JU_FUFU_OUTROS_ERR = [
-	"Ой-ой, что-то пошло не так... Фу-фу разберётся~ 🐾",
-	"Ох, ошибки... Не переживай, сестра рядом! 🐯",
-	"Фу-фу~ Видно, день не задался. Я рядом, малыш~"
-];
+// (橘福福 / "Ju Fufu" — the tiger-agent from Zenless Zone Zero).
+// Sets are picked by run context (see juFufuContextualLines):
+//   errors   — something actually needs attention
+//   codes    — new codes were claimed today (the "hunting" good day)
+//   quiet    — everything done, but nothing new happened
+//   ok       — fresh check-ins happened, no errors
+const JU_FUFU = {
+	intro: {
+		errors: [
+			"Fu-fu... 🐯 Come in. I've got good news and bad news — I'll start with the bad, so we end on the good.",
+			"Mur... Sweetheart, don't be scared, but today wasn't all smooth. Let me walk you through it~ 🐾"
+		],
+		codes: [
+			"Fu-fu-fu~ 🐯 The little tiger went hunting today — look what she dragged back!",
+			"Mur-mur~ Come sit closer, dear. Today I actually have something to brag about~ 🐾"
+		],
+		quiet: [
+			"Mur~ A quiet day, sunshine. Everything was already done before me — I just double-checked~ 🐾",
+			"Fu-fu~ A calm morning. All rewards collected, all tails in order~ 🐯"
+		],
+		ok: [
+			"Fu-fu-fu~ The family report is in! 🐯",
+			"Nyam-nyam~ Another day, another report~ 🐾"
+		]
+	},
+	outro: {
+		errors: [
+			"Take a look at the ❌ lines when you have a minute. It's usually just a stale cookie. Fu-fu believes in you~ 🐾",
+			"Don't sit on those errors, dear — a cookie takes two minutes to refresh, and rewards hate waiting. I'm here if you need me~ 🐯"
+		],
+		codes: [
+			"The loot is delivered, the tails are happy~ See you tomorrow, sunshine! 🐯",
+			"Fu-fu-fu~ A fine hunt. Check your in-game mail — there are presents waiting~ 🐾"
+		],
+		quiet: [
+			"Nothing new — and that's good too. Rest now, dear~ 🐯",
+			"Fu-fu, all clean. See you tomorrow, sweetie~ 🐾"
+		],
+		ok: [
+			"Have a lovely day, sunshine~ 🐾",
+			"Take care, dear~ Fu-fu-fu, see you tomorrow~ 🐯"
+		]
+	}
+};
 
 function juFufuPick (arr) {
 	return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// Picks the intro/outro set that matches what actually happened in the run.
+function juFufuContextualLines (lines) {
+	const hasErrors = lines.some(line => line.includes("❌"));
+	const hasNewCodes = lines.some(line => line.includes("🎁"));
+	const hasCheckins = lines.some(line => line.includes("✅"));
+	let mood = "ok";
+	if (hasErrors) mood = "errors";
+	else if (hasNewCodes) mood = "codes";
+	else if (!hasCheckins) mood = "quiet";
+	return { intro: juFufuPick(JU_FUFU.intro[mood]), outro: juFufuPick(JU_FUFU.outro[mood]), mood };
+}
+
+// Builds the compact per-account promo-code block:
+//   🎁 [Game] Nick: +2 new — CODE1, CODE2
+//   ⏭️ [Game] Nick: nothing new (11 already redeemed, 2 expired)
+//   ❌ [Game] Nick: 1 failed — CODE3 (Invalid cookie)
+function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, isForce = false) {
+	const lines = [];
+	const nick = `${account.nickname} (${account.uid})`.replace(UID_PAREN_RE, "");
+	const label = isForce ? `${nick} (force-run)` : nick;
+
+	if (claimed.length > 0) {
+		lines.push(`🎁 [${gameName}] ${label}: +${claimed.length} new — ${claimed.join(", ")}`);
+	}
+	if (failed.length > 0) {
+		for (const f of failed) {
+			lines.push(`❌ [${gameName}] ${label}: failed — ${f}`);
+		}
+	}
+	// The quiet line: only when there's nothing exciting to say, or to account
+	// for the remaining codes after a partial success.
+	const quietCount = skipped.length + expired.length;
+	if (claimed.length === 0 && failed.length === 0) {
+		const parts = [];
+		if (skipped.length > 0) parts.push(`${skipped.length} already redeemed`);
+		if (expired.length > 0) parts.push(`${expired.length} expired`);
+		lines.push(`⏭️ [${gameName}] ${label}: nothing new (${parts.join(", ") || "0 active codes"})`);
+	}
+	else if (quietCount > 0) {
+		const parts = [];
+		if (skipped.length > 0) parts.push(`${skipped.length} already redeemed`);
+		if (expired.length > 0) parts.push(`${expired.length} expired`);
+		lines.push(`⏭️ [${gameName}] ${label}: rest — ${parts.join(", ")}`);
+	}
+	if (total === 0) {
+		// No active codes at all — one line instead of an empty-looking report.
+		return [`ℹ️ [${gameName}] ${label}: no active promo codes right now`];
+	}
+	return lines;
 }
 
 function splitMessage (text, maxLen) {
@@ -244,8 +316,7 @@ function flushDiscordNotifications () {
 
 	const hasErrors = NOTIFICATIONS.some(line => line.includes("❌"));
 	const body = NOTIFICATIONS.join("\n");
-	const intro = juFufuPick(JU_FUFU_INTROS);
-	const outro = juFufuPick(hasErrors ? JU_FUFU_OUTROS_ERR : JU_FUFU_OUTROS_OK);
+	const { intro, outro } = juFufuContextualLines(NOTIFICATIONS);
 	// ">>> " on every report line marks it as a block-quote, visually
 	// separating Ju Fufu's commentary from the data she's reporting.
 	const quoted = body.split("\n").map(line => `>>> ${line}`).join("\n");
@@ -647,18 +718,20 @@ class Game {
 	async redeemCodes (account, buffer) {
 		const codes = await this.fetchCodes(buffer);
 		const redeemedCodes = this.getRedeemedCodes();
-		let claimed = 0;
-		let skipped = 0;
-		let failed = 0;
 
-		logNotification("info", this.fullName, `Checking ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`, buffer);
+		// Collect outcomes per code, then emit ONE grouped block per account
+		// instead of a line per code — with ~10 active codes the old per-line
+		// style flooded the Discord report.
+		const claimed = [];
+		const skipped = [];
+		const expired = [];
+		const failed = [];
 
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
 			if (redeemedCodes.includes(code.code)) {
 				console.log(`Code ${code.code} already redeemed for ${this.fullName}`);
-				logNotification("skip", this.fullName, `Code ${code.code} already redeemed for ${account.nickname}`, buffer);
-				skipped++;
+				skipped.push(code.code);
 				continue;
 			}
 
@@ -671,37 +744,34 @@ class Game {
 
 			if (result && result.success) {
 				this.saveRedeemedCode(code.code);
-				logNotification("code", this.fullName, `Code ${code.code} claimed for ${account.nickname} (${account.uid})`, buffer);
-				claimed++;
+				claimed.push(code.code);
 			}
 			else if (result && result.alreadyUsed) {
 				// Server says the code was already redeemed — remember it so we
 				// never try it again, and report as a skip rather than an error.
 				this.saveRedeemedCode(code.code);
-				logNotification("skip", this.fullName, `Code ${code.code} already redeemed on ${account.nickname}'s account`, buffer);
-				skipped++;
+				skipped.push(code.code);
 			}
 			else if (result && result.expired) {
-				logNotification("warn", this.fullName, `Code ${code.code} expired or invalid (skipped for ${account.nickname})`, buffer);
-				skipped++;
+				expired.push(code.code);
 			}
 			else {
-				logNotification("error", this.fullName, `Code ${code.code} failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`, buffer);
-				failed++;
+				const msg = String(result ? result.message : "Unknown error");
+				failed.push(`${code.code} (${msg.length > 80 ? msg.substring(0, 80) + "…" : msg})`);
 			}
 		}
 
-		logNotification("summary", this.fullName, `Promo codes for ${account.nickname}: ${claimed} claimed, ${skipped} skipped, ${failed} failed (of ${codes.length})`, buffer);
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed));
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
 	async forceRedeemCodes (account, buffer) {
 		const codes = await this.fetchCodes(buffer);
-		let claimed = 0;
-		let skipped = 0;
-		let failed = 0;
 
-		logNotification("info", this.fullName, `Force-redeeming ${codes.length} promo code(s) for ${account.nickname} (${account.uid})`, buffer);
+		const claimed = [];
+		const skipped = [];
+		const expired = [];
+		const failed = [];
 
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
@@ -715,25 +785,21 @@ class Game {
 				// Keep the local redeemed-list in sync so a normal run tomorrow
 				// doesn't retry codes the force-run already claimed.
 				this.saveRedeemedCode(code.code);
-				logNotification("code", this.fullName, `Code ${code.code} force-claimed for ${account.nickname} (${account.uid})`, buffer);
-				claimed++;
+				claimed.push(code.code);
 			}
 			else if (result && result.alreadyUsed) {
 				this.saveRedeemedCode(code.code);
-				logNotification("skip", this.fullName, `Code ${code.code} already redeemed on ${account.nickname}'s account`, buffer);
-				skipped++;
+				skipped.push(code.code);
 			}
 			else if (result && result.expired) {
-				logNotification("warn", this.fullName, `Code ${code.code} expired or invalid (skipped for ${account.nickname})`, buffer);
-				skipped++;
+				expired.push(code.code);
 			}
 			else {
-				logNotification("error", this.fullName, `Code ${code.code} force-redeem failed for ${account.nickname} (${account.uid}): ${result ? result.message : "Unknown error"}`, buffer);
-				failed++;
+				failed.push(`${code.code} — ${result ? result.message : "Unknown error"}`);
 			}
 		}
 
-		logNotification("summary", this.fullName, `Force-redeem for ${account.nickname}: ${claimed} claimed, ${skipped} skipped, ${failed} failed (of ${codes.length})`, buffer);
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, true));
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
@@ -787,8 +853,8 @@ class Game {
 			// Check for authentication errors and other failures
 			if (data.retcode !== 0) {
 				if (data.retcode === -1071) {
-					const msg = `Authentication error: ${data.message}. Try logging in via incognito mode and get a fresh cookie from there.`;
-					console.error(`Authentication error for code ${code} in ${this.fullName}: ${data.message}. Try logging in via incognito mode and get a fresh cookie from there.`);
+					const msg = "cookie expired — grab a fresh one (README step 2)";
+					console.error(`Authentication error for code ${code} in ${this.fullName}: ${data.message}`);
 					return { success: false, message: msg };
 				}
 				// Benign outcomes: code already used on this account, or code

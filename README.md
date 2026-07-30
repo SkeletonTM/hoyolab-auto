@@ -79,15 +79,18 @@ const DISCORD_USER_ID = "";    // optional, pings you when something goes wrong
 
 Follow [`setup/DISCORD_WEBHOOK.md`](setup/DISCORD_WEBHOOK.md) to create a webhook, then paste the URL into `DISCORD_WEBHOOK` (inside quotes). To also get a `@mention` whenever an error appears in the report, paste your numeric Discord user ID into `DISCORD_USER_ID`.
 
-With the webhook set, **every** run ends with a single Discord message that looks like this:
+With the webhook set, **every** run ends with a single Discord message that looks like this (wrapped in a short Ju Fufu voice line that matches the day — hunting day / quiet day / something-needs-attention day):
 
 ```text
-✅ [Genshin Impact] Alice (800000001): Got Primogem x20 (total: 31)
-⏭️ [Honkai: Star Rail] Bob (800000002): Already signed in today (total: 14)
-✅ [Zenless Zone Zero] Carol (800000003): Got Polychrome x50 (total: 8)
-🎁 [Genshin Impact] Code GENSHIN2026 claimed for Alice (800000001)
-⏭️ [Honkai: Star Rail] Code STARRAIL1 already redeemed for Bob
+✅ [Genshin Impact] Alice: Got Primogem x20 (total: 31)
+⏭️ [Honkai: Star Rail] Bob: Already signed in today (total: 14)
+✅ [Zenless Zone Zero] Carol: Got Polychrome x50 (total: 8)
+🎁 [Genshin Impact] Alice: +2 new — GENSHIN2026, NEWCODE01
+⏭️ [Genshin Impact] Alice: rest — 3 already redeemed, 1 expired
+⏭️ [Honkai: Star Rail] Bob: nothing new (11 already redeemed)
 ```
+
+Promo codes are grouped per account — one line for newly claimed codes, one compact summary line for the rest — instead of a line per code.
 
 ### 4. (Optional) Enable code redemption
 
