@@ -26,8 +26,7 @@ hoyolab-auto/
 ├── .gitignore
 ├── services/
 │   └── google-script/
-│       ├── index.js                         # the actual script — paste this into Apps Script
-│       └── README.md                        # original upstream setup guide (kept for reference)
+│       └── index.js                         # the actual script — paste this into Apps Script
 └── setup/
     └── DISCORD_WEBHOOK.md                   # how to create a Discord webhook URL
 ```
@@ -132,7 +131,13 @@ If you want codes checked for **all** accounts on every run — even when everyo
 redeemCodesEvenIfSignedIn: true,
 ```
 
-With that on, "already signed in" accounts are still skipped for check-in but are included in code redemption. Codes the API reports as already redeemed (`retcode -2017/-2018`) or expired (`-2001/-2003`) are logged as skips/warnings, not errors, and remembered so they're never retried.
+With that on, "already signed in" accounts are still skipped for check-in but are included in code redemption. Code outcomes are classified by retcode:
+
+- `-2017`/`-2018` — already redeemed → logged as a skip and remembered so it's never retried
+- `-2001`/`-2003` — expired/invalid → logged as a warning
+- `-2016` (cooldown) / `-1048` (API busy) — transient → not remembered, retried on the next run
+- `-1071`/`-100`/`-10001` — cookie expired → stops trying the remaining codes for that account
+- `1034`/`10035`/`10041` or a `gt_result.is_risk` response — CAPTCHA/risk gate → stops and tells you to solve it manually
 
 If you ever need to force-redeem a code (e.g. the API didn't return it in time), pick one of these functions in the toolbar and run it once:
 
@@ -259,8 +264,8 @@ The cookie string you pasted doesn't contain an `ltuid` or `ltuid_v2` field — 
 **I get `Error: undefined` in the report.**
 This is what the script writes when the underlying error has no `.message` field. Look at the surrounding text (e.g. `Failed to fetch promo codes: undefined`) — the function name usually tells you which API call failed. The full error is also in the **Executions** tab.
 
-**Code redemption says "retcode -1071".**
-Your cookie has expired. Repeat step 2 to grab a fresh one. The error message in the report includes the exact `retcode` and the API's own message.
+**Code redemption says "cookie expired — grab a fresh one".**
+Your cookie has expired (`retcode -1071` / `-100` / `-10001`). The script stops trying the remaining codes for that account and reports once. Repeat step 2 to grab a fresh cookie.
 
 **My account was already signed in and codes weren't claimed.**
 By default, code redemption in `checkInAllGames` only runs for accounts that *just* signed in (upstream behaviour). Two ways around it: set `redeemCodesEvenIfSignedIn: true` in the config to always check codes for every account, or use `redeemGenshinCodes(true)` / `redeemStarRailCodes(true)` / `redeemZenlessCodes(true)` from the toolbar to force a one-off run.
