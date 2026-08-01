@@ -279,6 +279,13 @@ You can also set **two triggers** if you want each region to be picked up as clo
 - Check the **Executions** tab in Apps Script for a `flushDiscordNotifications` error.
 - Make sure `NOTIFICATIONS.length > 0`. If every account was already signed in *and* there are no code events and no errors, the buffer is empty and the script deliberately sends nothing.
 
+**The report says "HoYoLAB server unavailable (HTTP 5xx/429) — retry later".**
+The HoYoLAB API (or one of the code sources) is temporarily down or rate
+limiting. This is transient — nothing is broken on your side, no codes are
+marked redeemed, and the next trigger run will simply try again. If it
+persists for hours, check [status.hoyolab.com](https://status.hoyolab.com)
+or the [HoyoLab support page](https://www.hoyolab.com/accountCenter/postList?id=2).
+
 **The report says "Cookie is missing ltuid/ltuid_v2".**
 The cookie string you pasted doesn't contain an `ltuid` or `ltuid_v2` field — usually a partial copy or an expired login. Re-grab the full cookie following step 2 (from the `getGameRecordCard` request), making sure you copy the entire `cookie` header value.
 
