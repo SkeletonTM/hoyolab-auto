@@ -1309,6 +1309,43 @@ class Game {
 		}
 		props.setProperty(uidKey, JSON.stringify(redeemedCodes));
 	}
+
+	// Per-account blocklist for codes HoYoLAB permanently rejects (region-locked,
+	// platform-locked). Parallel to the redeemed-codes storage: same key style
+	// (`<game>_blocked_codes_<uid>`), same single-read/write batch pattern.
+	getBlockedCodes (uid) {
+		const props = PropertiesService.getScriptProperties();
+		const uidKey = `${this.name}_blocked_codes_${uid}`;
+		const stored = props.getProperty(uidKey);
+		if (stored) {
+			try {
+				return JSON.parse(stored);
+			}
+			catch (e) { /* malformed — fall through */ }
+		}
+		return [];
+	}
+
+	saveBlockedCodes (codes, uid) {
+		const props = PropertiesService.getScriptProperties();
+		const uidKey = `${this.name}_blocked_codes_${uid}`;
+		let blockedCodes = [];
+		const existing = props.getProperty(uidKey);
+		if (existing) {
+			try {
+				blockedCodes = JSON.parse(existing);
+			}
+			catch (e) {
+				blockedCodes = [];
+			}
+		}
+		for (const code of codes) {
+			if (!blockedCodes.includes(code)) {
+				blockedCodes.push(code);
+			}
+		}
+		props.setProperty(uidKey, JSON.stringify(blockedCodes));
+	}
 }
 
 // Caps a redemption error message so one verbose API response can't blow up the

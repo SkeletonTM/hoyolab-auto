@@ -463,6 +463,19 @@ function load (overrides = {}) {
 		assert.strictEqual(res.permanent, undefined, "no permanent flag for generic error");
 	});
 
+	// 26. blocklist persistence helpers
+	await t("getBlockedCodes/saveBlockedCodes persist per-uid blocklist", async () => {
+		const api = load();
+		const game = new api.Game("zenless", { data: [COOKIE] });
+		// NOTE: getBlockedCodes returns arrays from the VM sandbox realm; compare
+		// via JSON.stringify instead of deepStrictEqual (prototype mismatch).
+		assert.strictEqual(JSON.stringify(game.getBlockedCodes("800000003")), "[]", "empty blocklist initially");
+		game.saveBlockedCodes(["CBW0884678"], "800000003");
+		game.saveBlockedCodes(["CBW0884678", "ZZZ4PC"], "800000003");
+		assert.strictEqual(JSON.stringify(game.getBlockedCodes("800000003")), '["CBW0884678","ZZZ4PC"]', "saved without dup");
+		assert.ok(!("zenless_blocked_codes_999" in properties), "no cross-account leak");
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();
