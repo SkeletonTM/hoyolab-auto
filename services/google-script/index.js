@@ -147,6 +147,20 @@ function storeSecretsFromConfig () {
 // record-card endpoints (hoyoverse.com / bbs-api) historically work with the
 // bare browser headers — and sending act.hoyolab.com as their Origin would be
 // wrong — so they omit Referer/Origin by default.
+
+// Guards an HTTP response before JSON.parse. HoYoLAB returns 429/5xx with a
+// non-JSON body (or an HTML error page) when the service is down or rate
+// limited; parsing that as JSON yields a misleading "Cannot parse JSON".
+// Returns { status: 200 } when fine, or { status: <code>, transient: true }
+// for 429 and 5xx so callers can report "server unavailable, retry later".
+function guardResponse (response) {
+	const code = response.getResponseCode();
+	if (code === 429 || code >= 500) {
+		return { status: code, transient: true };
+	}
+	return { status: code };
+}
+
 function browserHeaders (cookie, extra = {}, opts = {}) {
 	const base = {
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -574,7 +588,12 @@ class Game {
 
 				const info = await this.getSignInfo(cookie);
 				if (!info.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get sign info`, buffer);
+					if (info.transient) {
+						logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): HoYoLAB server unavailable (sign info) — retry later`, buffer);
+					}
+					else {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get sign info`, buffer);
+					}
 					continue;
 				}
 
@@ -607,7 +626,12 @@ class Game {
 
 				const awardsData = await this.getAwardsData(cookie);
 				if (!awardsData.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`, buffer);
+					if (awardsData.transient) {
+						logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): HoYoLAB server unavailable (awards) — retry later`, buffer);
+					}
+					else {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`, buffer);
+					}
 					continue;
 				}
 
@@ -627,7 +651,10 @@ class Game {
 
 				const sign = await this.sign(cookie);
 				if (!sign.success) {
-					if (sign.riskBlocked) {
+					if (sign.transient) {
+						logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): HoYoLAB server unavailable (sign) — retry later`, buffer);
+					}
+					else if (sign.riskBlocked) {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in blocked by HoYoLAB risk/CAPTCHA check — open the game once and solve it, then retry`, buffer);
 					}
 					else {
@@ -683,9 +710,13 @@ class Game {
 
 				const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
 				const response = await UrlFetchApp.fetch(url, options);
+				const g = guardResponse(response);
+				if (g.transient) {
+					throw new Error(`HoYoLAB server unavailable (HTTP ${g.status}) — try again later`);
+				}
 				data = JSON.parse(response.getContentText());
 
-				if (response.getResponseCode() !== 200 || data.retcode !== 0) {
+				if (g.status !== 200 || data.retcode !== 0) {
 					// Surface the most common failure (stale/expired cookie) with a
 					// human-readable message instead of a raw retcode dump.
 					const retcode = data && data.retcode;
@@ -727,6 +758,11 @@ class Game {
 			};
 
 			const response = UrlFetchApp.fetch(this.config.url.sign, options);
+			const g = guardResponse(response);
+			if (g.transient) {
+				console.error(`${this.fullName}:sign`, `HTTP ${g.status} — server unavailable, retry later`);
+				return { success: false, transient: true };
+			}
 			const data = JSON.parse(response.getContentText());
 
 			// Detect a geetest/risk-gate response first — HoYoLAB returns a
@@ -772,9 +808,14 @@ class Game {
 					"x-rpc-signgame": this.getSignGameHeader()
 				}, { withReferer: true })
 			});
+			const g = guardResponse(response);
+			if (g.transient) {
+				console.error(`${this.fullName}:getSignInfo`, `HTTP ${g.status} — server unavailable, retry later`);
+				return { success: false, transient: true };
+			}
 			const data = JSON.parse(response.getContentText());
 
-			if (response.getResponseCode() !== 200 || data.retcode !== 0) {
+			if (g.status !== 200 || data.retcode !== 0) {
 				console.error(
 					`${this.fullName}:getSignInfo`,
 					"Failed to get sign info.",
@@ -805,9 +846,14 @@ class Game {
 					"x-rpc-signgame": this.getSignGameHeader()
 				}, { withReferer: true })
 			});
+			const g = guardResponse(response);
+			if (g.transient) {
+				console.error(`${this.fullName}:getAwardsData`, `HTTP ${g.status} — server unavailable, retry later`);
+				return { success: false, transient: true };
+			}
 			const data = JSON.parse(response.getContentText());
 
-			if (response.getResponseCode() !== 200 || data.retcode !== 0) {
+			if (g.status !== 200 || data.retcode !== 0) {
 				console.error(
 					`${this.fullName}:getAwardsData`,
 					"Failed to get awards data.",
@@ -887,8 +933,14 @@ class Game {
 
 			const result = await this.redeemCode(account, code.code);
 
-			// If the cookie is dead or we hit a CAPTCHA gate, there is no point
-			// trying the remaining codes for this account — stop and report once.
+			// If the server is down, the cookie is dead or we hit a CAPTCHA gate,
+			// there is no point trying the remaining codes for this account —
+			// stop and report once.
+			if (result && result.transient) {
+				logNotification("warn", this.fullName,
+					`${account.nickname} (${account.uid}): HoYoLAB server unavailable (HTTP ${result.status}) — skipping remaining codes, retry later`, buffer);
+				break;
+			}
 			if (result && (result.cookieExpired || result.captcha)) {
 				failed.push(`${code.code} (${truncateMsg(String(result.message))})`);
 				logNotification("error", this.fullName,
@@ -954,7 +1006,12 @@ class Game {
 			console.log(`Attempting to redeem code ${code.code} for ${this.fullName}`);
 			const result = await this.redeemCode(account, code.code);
 
-			// Stop early on dead cookie / CAPTCHA, same as redeemCodes.
+			// Stop early on server-down / dead cookie / CAPTCHA, same as redeemCodes.
+			if (result && result.transient) {
+				logNotification("warn", this.fullName,
+					`${account.nickname} (${account.uid}): HoYoLAB server unavailable (HTTP ${result.status}) — skipping remaining codes, retry later`, buffer);
+				break;
+			}
 			if (result && (result.cookieExpired || result.captcha)) {
 				failed.push(`${code.code} — ${truncateMsg(String(result.message))}`);
 				logNotification("error", this.fullName,
@@ -1041,6 +1098,11 @@ class Game {
 
 		try {
 			const response = await UrlFetchApp.fetch(url, options);
+			const g = guardResponse(response);
+			if (g.transient) {
+				console.error(`Code ${code} redemption skipped for ${this.fullName}: HTTP ${g.status} — server unavailable, retry later`);
+				return { success: false, transient: true, status: g.status, message: `HTTP ${g.status} — server unavailable, retry later` };
+			}
 			const data = JSON.parse(response.getContentText());
 
 			// Check for authentication errors and other failures

@@ -31,6 +31,23 @@ hoyolab-auto/
     └── DISCORD_WEBHOOK.md                   # how to create a Discord webhook URL
 ```
 
+## Tests
+
+The script has a smoke-test harness that stubs the GAS runtime
+(`UrlFetchApp`, `PropertiesService`, `Utilities`) and drives the main flows
+against canned responses — no Google account needed:
+
+```bash
+npm test
+# or, without npm:
+node services/google-script/__tests__/smoke-test.js
+```
+
+The suite covers check-in, per-account code redemption, retcode
+classification (-2016 cooldown, -2017 already-used, -2001/-2003 expired,
+-100/-1071 cookie, -1048 busy, CAPTCHA `gt_result.is_risk`), HTTP 429/5xx
+transient handling, legacy-key migration, and the Discord report format.
+
 ## Quick start
 
 ### 1. Create the script
@@ -87,6 +104,7 @@ With the webhook set, **every** run ends with a single Discord message that look
 ✅ [Zenless Zone Zero] Carol: Got Polychrome x50 (total: 8)
 🎁 [Genshin Impact] Alice: +2 new — GENSHIN2026, NEWCODE01
 ⏭️ [Genshin Impact] Alice: rest — 3 already redeemed, 1 expired
+⚠️ [Genshin Impact] Alice: 2 in cooldown — retried next run
 ⏭️ [Honkai: Star Rail] Bob: nothing new (11 already redeemed)
 ```
 
