@@ -4,6 +4,12 @@ const config = {
 	// those that were already signed in today. If false (default), codes are
 	// only redeemed for accounts that just signed in (upstream behaviour).
 	redeemCodesEvenIfSignedIn: false,
+	// Pause between individual redemption requests. This is NOT a pacing knob
+	// for "how many accounts" — it's the throttle that keeps you under HoYoLAB's
+	// rate limit on the cdkey endpoint (there is no published threshold, but a
+	// burst of rapid redemption calls is what triggers it). Don't lower it below
+	// ~2000-3000ms unless you're OK risking a temporary rate-limit block.
+	redeemSleepMs: 6000,
 	genshin: {
 		data: [
 			// "account_cookie_1",
@@ -34,31 +40,131 @@ const config = {
 	}
 };
 
-// Function to reset redeemed codes for all games
+// Function to reset redeemed codes for all games. Clears both the legacy
+// per-game keys and the current per-account keys (prefix match).
 function resetAllRedeemedCodes () {
-	const games = ["genshin", "honkai", "starrail", "zenless"];
-	for (const game of games) {
-		PropertiesService.getScriptProperties().deleteProperty(`${game}_redeemed_codes`);
+	const props = PropertiesService.getScriptProperties();
+	const prefix = new Set(["genshin_", "honkai_", "starrail_", "zenless_"]);
+	let cleared = 0;
+	const all = props.getProperties();
+	for (const key of Object.keys(all)) {
+		if ([...prefix].some(p => key.startsWith(p)) && key.includes("redeemed_codes")) {
+			props.deleteProperty(key);
+			cleared++;
+		}
 	}
-	console.log("Redeemed codes for all games have been reset.");
+	console.log(`Redeemed codes cleared (${cleared} key(s)).`);
 }
 
-// Function to view all stored redeemed codes
+// Function to view all stored redeemed codes (legacy + per-account keys)
 function viewAllRedeemedCodes () {
-	const games = ["genshin", "honkai", "starrail", "zenless"];
+	const props = PropertiesService.getScriptProperties();
+	const all = props.getProperties();
 	const allCodes = {};
-
-	for (const game of games) {
-		const redeemedCodes = PropertiesService.getScriptProperties().getProperty(`${game}_redeemed_codes`);
-		allCodes[game] = redeemedCodes ? JSON.parse(redeemedCodes) : [];
+	for (const key of Object.keys(all)) {
+		if (!key.includes("redeemed_codes")) continue;
+		const value = all[key];
+		try {
+			allCodes[key] = JSON.parse(value);
+		}
+		catch (e) {
+			allCodes[key] = value;
+		}
 	}
-
 	console.log("All redeemed codes:", allCodes);
 	return allCodes;
 }
 
 const DISCORD_WEBHOOK = null; // Replace with your Discord webhook URL (optional)
 const DISCORD_USER_ID = ""; // Optional: Discord user ID to ping on errors (e.g. "123456789012345678")
+
+// ---------------------------------------------------------------------------
+// Secrets handling.
+//
+// The cookie strings and the Discord webhook are account credentials. Keeping
+// them in the source file is fine for a personal, never-published project, but
+// if this file ever goes into a repo, they leak. As a safer (and still simple)
+// option you can store them in Apps Script properties instead:
+//
+//   * Script Properties key  COOKIE_genshin / COOKIE_honkai / COOKIE_starrail /
+//     COOKIE_zenless  — value is a JSON array of cookie strings, e.g.
+//     '["ltoken_v2=...; ltuid_v2=...;", "ltoken_v2=...; ltuid_v2=...;"]'
+//   * Script Properties key  WEBHOOK_URL  — your Discord webhook URL
+//   * Script Properties key  DISCORD_ID   — your Discord user ID
+//
+// The script prefers the properties value and falls back to the inline config
+// below, so both styles work. To populate the properties quickly, run
+// `storeSecretsFromConfig()` once after filling in config/DISCORD_WEBHOOK
+// below — it copies everything into Script Properties for you.
+// ---------------------------------------------------------------------------
+
+function getCookies (game) {
+	const stored = PropertiesService.getScriptProperties().getProperty(`COOKIE_${game}`);
+	if (stored) {
+		try {
+			const arr = JSON.parse(stored);
+			if (Array.isArray(arr)) return arr;
+		}
+		catch (e) { /* malformed — fall through to inline config */ }
+	}
+	return (config[game] && Array.isArray(config[game].data)) ? config[game].data : [];
+}
+
+function getWebhook () {
+	return PropertiesService.getScriptProperties().getProperty("WEBHOOK_URL") || DISCORD_WEBHOOK;
+}
+
+function getDiscordUserId () {
+	return PropertiesService.getScriptProperties().getProperty("DISCORD_ID") || DISCORD_USER_ID;
+}
+
+// One-shot helper: copies the inline config cookies + webhook + Discord ID into
+// Script Properties so you can then blank them out of the source before pushing.
+function storeSecretsFromConfig () {
+	const props = PropertiesService.getScriptProperties();
+	for (const game of ["genshin", "honkai", "starrail", "zenless"]) {
+		if (Array.isArray(config[game]?.data) && config[game].data.length > 0) {
+			props.setProperty(`COOKIE_${game}`, JSON.stringify(config[game].data));
+		}
+	}
+	if (DISCORD_WEBHOOK) props.setProperty("WEBHOOK_URL", DISCORD_WEBHOOK);
+	if (DISCORD_USER_ID) props.setProperty("DISCORD_ID", DISCORD_USER_ID);
+	console.log("Secrets copied to Script Properties. You can now blank them out of the source.");
+}
+
+// ---------------------------------------------------------------------------
+// Browser-like headers.
+//
+// The check-in and redemption endpoints behave more predictably when they see a
+// realistic browser fingerprint (mirrored from canaria3406/hoyolab-auto-sign
+// and hashblen/hoyo-redeem-codes-script). Two requests in the original script
+// (getSignInfo, getAwardsData) were sent with no User-Agent at all; giving every
+// call the same full header set reduces the chance of bot-detection/CAPTCHA
+// friction. `extra` is merged last so per-request headers win.
+// ---------------------------------------------------------------------------
+// `opts.withReferer` adds Referer/Origin only for the act.hoyolab.com check-in
+// endpoints, where they're proven to help (canaria3406). The redemption and
+// record-card endpoints (hoyoverse.com / bbs-api) historically work with the
+// bare browser headers — and sending act.hoyolab.com as their Origin would be
+// wrong — so they omit Referer/Origin by default.
+function browserHeaders (cookie, extra = {}, opts = {}) {
+	const base = {
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+		Accept: "application/json, text/plain, */*",
+		"Accept-Encoding": "gzip, deflate, br",
+		Connection: "keep-alive",
+		"x-rpc-app_version": "2.71.0",
+		"x-rpc-client_type": "4",
+		Cookie: cookie,
+		...extra
+	};
+	if (opts.withReferer) {
+		base.Referer = "https://act.hoyolab.com/";
+		base.Origin = "https://act.hoyolab.com";
+	}
+	return base;
+}
+
 
 // Promo-code data sources. Both return the current set of active codes for a
 // given game. Two are wired in: ennead.cc (torikushiii's aggregator) and
@@ -152,15 +258,33 @@ async function fetchCodes (gameParam) {
 // merged into NOTIFICATIONS right before flushDiscordNotifications().
 const NOTIFICATIONS = [];
 
-// Retcodes from the cdkey redemption API that mean "this code is already
-// redeemed on this account" — a normal, expected outcome, not an error.
-// Verified against torikushiii/hoyolab-auto (node) and
-// hashblen/hoyo-redeem-codes-script (independent GAS implementation).
+// Retcodes from the cdkey redemption API, mapped from the upstream
+// hoyolab-auto error-messages table (torikushiii/hoyolab-auto) plus the
+// codes used by the check-in endpoints.
+
+// "This code was already redeemed on this account" — a normal, expected
+// outcome, not an error. -2017 = already used (per upstream error map).
 const REDEEM_RETCODE_ALREADY_USED = [-2017, -2018];
 
-// Retcodes meaning "code expired or never existed" — report as a warning,
-// not as a scary error line.
+// "Code expired or never existed" — report as a warning, not an error.
 const REDEEM_RETCODE_EXPIRED_OR_INVALID = [-2001, -2003];
+
+// "Redemption is in cooldown" — transient, NOT redeemed and NOT an error.
+// The code should simply be retried later. We must NOT persist it as
+// redeemed (so a later run retries it) and must NOT report it as a failure.
+const REDEEM_RETCODE_COOLDOWN = [-2016];
+
+// Cookie is invalid / expired — the whole account is unusable. Detect these
+// so we can stop hammering the API and give one clear message instead of a
+// per-code error. -100/-10001 = invalid/expired cookie (upstream error map).
+const REDEEM_RETCODE_COOKIE_INVALID = [-1071, -100, -10001];
+
+// HoYoLAB risk/CAPTCHA challenge codes (upstream CaptchaCodes list). These
+// mean "stop hitting the API" rather than "this code is bad".
+const REDEEM_RETCODE_CAPTCHA = [10035, 10041, 1034];
+
+// "API system is busy" — transient, retry-worthy (upstream error map).
+const REDEEM_RETCODE_BUSY = [-1048];
 
 const NOTIFICATION_ICONS = {
 	info: "ℹ️",
@@ -252,7 +376,7 @@ function juFufuContextualLines (lines) {
 //   🎁 [Game] Nick: +2 new — CODE1, CODE2
 //   ⏭️ [Game] Nick: nothing new (11 already redeemed, 2 expired)
 //   ❌ [Game] Nick: 1 failed — CODE3 (Invalid cookie)
-function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, isForce = false) {
+function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], isForce = false) {
 	const lines = [];
 	const nick = `${account.nickname} (${account.uid})`.replace(UID_PAREN_RE, "");
 	const label = isForce ? `${nick} (force-run)` : nick;
@@ -265,10 +389,15 @@ function formatCodeReport (gameName, account, total, claimed, skipped, expired, 
 			lines.push(`❌ [${gameName}] ${label}: failed — ${f}`);
 		}
 	}
+	// Cooldown codes: not redeemed, not errors — retry later. Only worth a
+	// line when there's nothing more interesting for this account.
+	if (cooldown.length > 0) {
+		lines.push(`⚠️ [${gameName}] ${label}: ${cooldown.length} in cooldown — retried next run`);
+	}
 	// The quiet line: only when there's nothing exciting to say, or to account
 	// for the remaining codes after a partial success.
 	const quietCount = skipped.length + expired.length;
-	if (claimed.length === 0 && failed.length === 0) {
+	if (claimed.length === 0 && failed.length === 0 && cooldown.length === 0) {
 		const parts = [];
 		if (skipped.length > 0) parts.push(`${skipped.length} already redeemed`);
 		if (expired.length > 0) parts.push(`${expired.length} expired`);
@@ -309,7 +438,8 @@ function splitMessage (text, maxLen) {
 }
 
 function flushDiscordNotifications () {
-	if (!DISCORD_WEBHOOK || NOTIFICATIONS.length === 0) {
+	const webhook = getWebhook();
+	if (!webhook || NOTIFICATIONS.length === 0) {
 		NOTIFICATIONS.length = 0;
 		return;
 	}
@@ -323,13 +453,14 @@ function flushDiscordNotifications () {
 	const wrapped = `${intro}\n${quoted}\n${outro}`;
 	const chunks = splitMessage(wrapped, 1900); // Discord content limit is 2000
 
+	const discordUserId = getDiscordUserId();
 	for (let i = 0; i < chunks.length; i++) {
 		let content = chunks[i];
-		if (i === 0 && hasErrors && DISCORD_USER_ID) {
-			content = `<@${DISCORD_USER_ID}> ${content}`;
+		if (i === 0 && hasErrors && discordUserId) {
+			content = `<@${discordUserId}> ${content}`;
 		}
 		try {
-			UrlFetchApp.fetch(DISCORD_WEBHOOK, {
+			UrlFetchApp.fetch(webhook, {
 				method: "POST",
 				contentType: "application/json",
 				payload: JSON.stringify({ content }),
@@ -406,7 +537,7 @@ class Game {
 	constructor (name, config) {
 		this.name = name;
 		this.fullName = DEFAULT_CONSTANTS[name].game; // Get full name from constants
-		this.config = { ...DEFAULT_CONSTANTS[name], ...config.config };
+		this.config = { ...DEFAULT_CONSTANTS[name] };
 		this.data = config.data || [];
 		this._codesCache = null; // Per-run cache for fetchCodes()
 		this._recordCardCache = new Map(); // ltuid -> raw record-card payload
@@ -446,7 +577,6 @@ class Game {
 
 				const data = {
 					total: info.data.total,
-					today: info.data.today,
 					isSigned: info.data.isSigned
 				};
 
@@ -494,7 +624,12 @@ class Game {
 
 				const sign = await this.sign(cookie);
 				if (!sign.success) {
-					logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in API call failed`, buffer);
+					if (sign.riskBlocked) {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in blocked by HoYoLAB risk/CAPTCHA check — open the game once and solve it, then retry`, buffer);
+					}
+					else {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in API call failed`, buffer);
+					}
 					continue;
 				}
 
@@ -520,7 +655,11 @@ class Game {
 			}
 			catch (e) {
 				console.error(`${this.fullName}:CheckIn`, e);
-				logNotification("error", this.fullName, `Unexpected error: ${e?.message || String(e)}`, buffer);
+				const msg = String(e?.message || e);
+				// getAccountDetails throws human-readable messages for cookie
+				// problems; pass those through rather than a generic wrapper.
+				logNotification("error", this.fullName,
+					msg.startsWith("cookie invalid/expired") ? msg : `Unexpected error: ${msg}`, buffer);
 			}
 			}
 
@@ -536,10 +675,7 @@ class Game {
 			if (!data) {
 				const options = {
 					method: "GET",
-					headers: {
-						"User-Agent": this.userAgent,
-						Cookie: cookieData
-					}
+					headers: browserHeaders(cookieData)
 				};
 
 				const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
@@ -547,6 +683,12 @@ class Game {
 				data = JSON.parse(response.getContentText());
 
 				if (response.getResponseCode() !== 200 || data.retcode !== 0) {
+					// Surface the most common failure (stale/expired cookie) with a
+					// human-readable message instead of a raw retcode dump.
+					const retcode = data && data.retcode;
+					if (retcode === -100 || retcode === -10001) {
+						throw new Error(`cookie invalid/expired — grab a fresh one (README step 2) [retcode ${retcode}]`);
+					}
 					throw new Error(`Failed to login to ${this.fullName} account: ${JSON.stringify(data)}`);
 				}
 				this._recordCardCache.set(ltuid, data);
@@ -576,17 +718,22 @@ class Game {
 			const options = {
 				method: "POST",
 				contentType: "application/json",
-				headers: {
-					"User-Agent": this.userAgent,
-					Cookie: cookieData,
+				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
-				},
-				payload: JSON.stringify(payload)
+				}, { withReferer: true }),
 			};
 
 			const response = UrlFetchApp.fetch(this.config.url.sign, options);
 			const data = JSON.parse(response.getContentText());
 
+			// Detect a geetest/risk-gate response first — HoYoLAB returns a
+			// CAPTCHA challenge with `gt_result.is_risk` even when retcode is 0,
+			// so this check must come before the generic retcode check. Report it
+			// as a distinct, actionable warning instead of a misleading success.
+			if (data?.data?.gt_result?.is_risk === 1) {
+				console.error(`${this.fullName}:sign`, "Blocked by risk/CAPTCHA check.", data);
+				return { success: false, riskBlocked: true };
+			}
 			if (response.getResponseCode() !== 200 || data.retcode !== 0) {
 				console.error(`${this.fullName}:sign`, "Failed to sign in.", data);
 				return { success: false };
@@ -617,10 +764,9 @@ class Game {
 		try {
 			const url = `${this.config.url.info}?act_id=${this.config.ACT_ID}`;
 			const response = await UrlFetchApp.fetch(url, {
-				headers: {
-					Cookie: cookieData,
+				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
-				}
+				}, { withReferer: true })
 			});
 			const data = JSON.parse(response.getContentText());
 
@@ -637,7 +783,6 @@ class Game {
 				success: true,
 				data: {
 					total: data.data.total_sign_day,
-					today: data.data.today,
 					isSigned: data.data.is_sign
 				}
 			};
@@ -652,10 +797,9 @@ class Game {
 		try {
 			const url = `${this.config.url.home}?act_id=${this.config.ACT_ID}`;
 			const response = await UrlFetchApp.fetch(url, {
-				headers: {
-					Cookie: cookieData,
+				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
-				}
+				}, { withReferer: true })
 			});
 			const data = JSON.parse(response.getContentText());
 
@@ -668,11 +812,15 @@ class Game {
 				return { success: false };
 			}
 
-			if (data.data.awards.length === 0) {
+			// Guard against a malformed/absent awards payload. Without this,
+			// `.length` and later `awards[totalSigned]` would throw on some
+			// transient API responses.
+			if (!Array.isArray(data.data?.awards) || data.data.awards.length === 0) {
 				console.warn(
 					`${this.fullName}:getAwardsData`,
 					"No awards data available."
 				);
+				return { success: false, message: "No awards data available" };
 			}
 
 			return { success: true, data: data.data.awards };
@@ -711,13 +859,9 @@ class Game {
 		}
 	}
 
-	get userAgent () {
-		return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-	}
-
 	async redeemCodes (account, buffer) {
 		const codes = await this.fetchCodes(buffer);
-		const redeemedCodes = this.getRedeemedCodes();
+		const redeemedCodes = this.getRedeemedCodes(account.uid);
 
 		// Collect outcomes per code, then emit ONE grouped block per account
 		// instead of a line per code — with ~10 active codes the old per-line
@@ -726,6 +870,8 @@ class Game {
 		const skipped = [];
 		const expired = [];
 		const failed = [];
+		const cooldown = [];
+		const newlyRedeemed = []; // batched, persisted once below
 
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
@@ -736,32 +882,51 @@ class Game {
 			}
 
 			const result = await this.redeemCode(account, code.code);
+
+			// If the cookie is dead or we hit a CAPTCHA gate, there is no point
+			// trying the remaining codes for this account — stop and report once.
+			if (result && (result.cookieExpired || result.captcha)) {
+				failed.push(`${code.code} (${truncateMsg(String(result.message))})`);
+				logNotification("error", this.fullName,
+					`${account.nickname} (${account.uid}): ${result.captcha ? "blocked by CAPTCHA/risk check" : "cookie invalid/expired"} — skipping remaining codes`, buffer);
+				break;
+			}
+
 			// Rate-limit pause between redemption calls — but never after the
-			// final code, where it would just add 6 dead seconds to the run.
+			// final code, where it would just add wasted seconds to the run.
 			if (i < codes.length - 1) {
-				Utilities.sleep(6000);
+				Utilities.sleep(config.redeemSleepMs);
 			}
 
 			if (result && result.success) {
-				this.saveRedeemedCode(code.code);
+				newlyRedeemed.push(code.code);
 				claimed.push(code.code);
 			}
 			else if (result && result.alreadyUsed) {
 				// Server says the code was already redeemed — remember it so we
 				// never try it again, and report as a skip rather than an error.
-				this.saveRedeemedCode(code.code);
+				newlyRedeemed.push(code.code);
 				skipped.push(code.code);
 			}
 			else if (result && result.expired) {
 				expired.push(code.code);
 			}
+			else if (result && result.cooldown) {
+				// Transient cooldown: NOT redeemed, NOT persisted — retried later.
+				cooldown.push(code.code);
+			}
 			else {
 				const msg = String(result ? result.message : "Unknown error");
-				failed.push(`${code.code} (${msg.length > 80 ? msg.substring(0, 80) + "…" : msg})`);
+				failed.push(`${code.code} (${truncateMsg(msg)})`);
 			}
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed));
+		// One properties write for the whole account instead of one per code.
+		if (newlyRedeemed.length > 0) {
+			this.saveRedeemedCodes(newlyRedeemed, account.uid);
+		}
+
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown));
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
@@ -772,34 +937,52 @@ class Game {
 		const skipped = [];
 		const expired = [];
 		const failed = [];
+		const cooldown = [];
+		const newlyRedeemed = [];
 
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
 			console.log(`Attempting to redeem code ${code.code} for ${this.fullName}`);
 			const result = await this.redeemCode(account, code.code);
+
+			// Stop early on dead cookie / CAPTCHA, same as redeemCodes.
+			if (result && (result.cookieExpired || result.captcha)) {
+				failed.push(`${code.code} — ${truncateMsg(String(result.message))}`);
+				logNotification("error", this.fullName,
+					`${account.nickname} (${account.uid}): ${result.captcha ? "blocked by CAPTCHA/risk check" : "cookie invalid/expired"} — skipping remaining codes`, buffer);
+				break;
+			}
+
 			if (i < codes.length - 1) {
-				Utilities.sleep(6000);
+				Utilities.sleep(config.redeemSleepMs);
 			}
 
 			if (result && result.success) {
 				// Keep the local redeemed-list in sync so a normal run tomorrow
 				// doesn't retry codes the force-run already claimed.
-				this.saveRedeemedCode(code.code);
+				newlyRedeemed.push(code.code);
 				claimed.push(code.code);
 			}
 			else if (result && result.alreadyUsed) {
-				this.saveRedeemedCode(code.code);
+				newlyRedeemed.push(code.code);
 				skipped.push(code.code);
 			}
 			else if (result && result.expired) {
 				expired.push(code.code);
 			}
+			else if (result && result.cooldown) {
+				cooldown.push(code.code);
+			}
 			else {
-				failed.push(`${code.code} — ${result ? result.message : "Unknown error"}`);
+				failed.push(`${code.code} — ${truncateMsg(String(result ? result.message : "Unknown error"))}`);
 			}
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, true));
+		if (newlyRedeemed.length > 0) {
+			this.saveRedeemedCodes(newlyRedeemed, account.uid);
+		}
+
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, true));
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
@@ -840,10 +1023,7 @@ class Game {
 		const url = this.getRedemptionUrl(account, code);
 		const options = {
 			method: this.name === "starrail" ? "POST" : "GET",
-			headers: {
-				"User-Agent": this.userAgent,
-				Cookie: account.cookie
-			}
+			headers: browserHeaders(account.cookie)
 		};
 
 		try {
@@ -851,16 +1031,33 @@ class Game {
 			const data = JSON.parse(response.getContentText());
 
 			// Check for authentication errors and other failures
+			// HoYoLAB's risk-gate can appear even with retcode 0, so check it first.
+			if (data?.data?.gt_result?.is_risk === 1) {
+				const msg = "blocked by risk/CAPTCHA check — slow down or solve manually";
+				console.error(`Risk/CAPTCHA gate for code ${code} in ${this.fullName}: ${data.message || ""}`);
+				return { success: false, captcha: true, message: msg };
+			}
 			if (data.retcode !== 0) {
-				if (data.retcode === -1071) {
+				// Cookie invalid/expired — the whole account is unusable. Report
+				// once so the caller can stop trying the rest of the codes.
+				if (REDEEM_RETCODE_COOKIE_INVALID.includes(data.retcode)) {
 					const msg = "cookie expired — grab a fresh one (README step 2)";
 					console.error(`Authentication error for code ${code} in ${this.fullName}: ${data.message}`);
-					return { success: false, message: msg };
+					return { success: false, cookieExpired: true, message: msg };
+				}
+				// CAPTCHA challenge — stop and tell the user, not a per-code error.
+				if (REDEEM_RETCODE_CAPTCHA.includes(data.retcode)) {
+					console.error(`CAPTCHA challenge for code ${code} in ${this.fullName}: ${data.message || ""}`);
+					return { success: false, captcha: true, message: "blocked by CAPTCHA — slow down or solve manually" };
+				}
+				// Redemption cooldown — transient; retry later, don't persist as redeemed.
+				if (REDEEM_RETCODE_COOLDOWN.includes(data.retcode)) {
+					console.log(`Code ${code} in cooldown for ${this.fullName} (retcode ${data.retcode})`);
+					return { success: false, cooldown: true, message: data.message || "Redemption in cooldown" };
 				}
 				// Benign outcomes: code already used on this account, or code
 				// expired/never valid. Callers report these as skip/warn, never
-				// as errors. Retcode values cross-checked against
-				// torikushiii/hoyolab-auto (node) and hashblen's GAS version.
+				// as errors.
 				if (REDEEM_RETCODE_ALREADY_USED.includes(data.retcode)) {
 					console.log(`Code ${code} already used for ${this.fullName} (retcode ${data.retcode})`);
 					return { success: false, alreadyUsed: true, message: data.message || "Already redeemed" };
@@ -868,6 +1065,10 @@ class Game {
 				if (REDEEM_RETCODE_EXPIRED_OR_INVALID.includes(data.retcode)) {
 					console.log(`Code ${code} expired/invalid for ${this.fullName} (retcode ${data.retcode})`);
 					return { success: false, expired: true, message: data.message || "Expired or invalid code" };
+				}
+				if (REDEEM_RETCODE_BUSY.includes(data.retcode)) {
+					console.error(`API busy for code ${code} in ${this.fullName}: ${data.message}`);
+					return { success: false, busy: true, message: "API busy — retry later" };
 				}
 				console.error(`Code ${code} redemption failed for ${this.fullName}:`, data);
 				return { success: false, message: data.message || `retcode ${data.retcode}` };
@@ -951,20 +1152,79 @@ class Game {
 		}
 	}
 
-	getRedeemedCodes () {
-		const redeemedCodes = PropertiesService.getScriptProperties().getProperty(`${this.name}_redeemed_codes`);
-		return redeemedCodes ? JSON.parse(redeemedCodes) : [];
+	// Redeemed-codes are stored PER ACCOUNT, not per game. Promo codes are
+	// single-use per account, so the same code can (and should) be redeemed on
+	// every account of a game. The original script stored one list per game,
+	// which meant a code redeemed by account A was silently skipped for account
+	// B — losing rewards for multi-account setups. Keying by uid fixes that.
+	//
+	// Migration: the old key was `<game>_redeemed_codes`. For a single account
+	// we still read it once so existing users don't suddenly re-attempt every
+	// code; as soon as anything is written the per-uid key takes over. For
+	// multi-account this is safe too: it only ever seeds the FIRST account that
+	// runs, and never blocks a code that other accounts haven't used yet.
+	getRedeemedCodes (uid) {
+		const props = PropertiesService.getScriptProperties();
+		const uidKey = `${this.name}_redeemed_codes_${uid}`;
+		const stored = props.getProperty(uidKey);
+		if (stored) {
+			try {
+				return JSON.parse(stored);
+			}
+			catch (e) { /* malformed — fall through */ }
+		}
+		// Migration fallback: old per-game key. Only used for a first run after
+		// upgrade and only as a read seed (see comment above).
+		const legacy = props.getProperty(`${this.name}_redeemed_codes`);
+		if (legacy) {
+			try {
+				const arr = JSON.parse(legacy);
+				if (Array.isArray(arr)) return arr;
+			}
+			catch (e) { /* ignore */ }
+		}
+		return [];
 	}
 
-	saveRedeemedCode (code) {
-		const redeemedCodes = this.getRedeemedCodes();
-		redeemedCodes.push(code);
-		PropertiesService.getScriptProperties().setProperty(`${this.name}_redeemed_codes`, JSON.stringify(redeemedCodes));
+	// Persist one batch of newly redeemed codes with a single read + write, so a
+	// run with ~10 codes touches PropertiesService once per account instead of
+	// once per code. If the run is killed mid-way the loss is self-healing: the
+	// API reports an already-redeemed code as retcode -2017 and it gets recorded
+	// on the next attempt.
+	saveRedeemedCodes (codes, uid) {
+		const props = PropertiesService.getScriptProperties();
+		const uidKey = `${this.name}_redeemed_codes_${uid}`;
+		let redeemedCodes;
+		const existing = props.getProperty(uidKey);
+		if (existing) {
+			try {
+				redeemedCodes = JSON.parse(existing);
+			}
+			catch (e) {
+				redeemedCodes = [];
+			}
+		}
+		else {
+			redeemedCodes = [];
+		}
+		for (const code of codes) {
+			if (!redeemedCodes.includes(code)) {
+				redeemedCodes.push(code);
+			}
+		}
+		props.setProperty(uidKey, JSON.stringify(redeemedCodes));
 	}
 }
 
+// Caps a redemption error message so one verbose API response can't blow up the
+// Discord report. Shared by redeemCodes and forceRedeemCodes.
+function truncateMsg (msg, max = 80) {
+	const s = String(msg);
+	return s.length > max ? s.substring(0, max) + "…" : s;
+}
+
 function checkInGame (gameName) {
-	const game = new Game(gameName, config[gameName]);
+	const game = new Game(gameName, { data: getCookies(gameName) });
 	// Per-game notification buffer: games run concurrently via Promise.all in
 	// checkInAllGames, and writing into one shared array would interleave lines
 	// and let a failure-triggered flush steal another game's pending messages.
@@ -987,7 +1247,7 @@ function checkInGame (gameName) {
 			// documented upstream behaviour). Tell the user so the Discord
 			// message doesn't look like we forgot about codes.
 			if (successes.length === 0) {
-				const hasAccounts = Array.isArray(config[gameName]?.data) && config[gameName].data.length > 0;
+				const hasAccounts = getCookies(gameName).length > 0;
 				if (hasAccounts) {
 					logNotification("info", gameName, "No new check-ins; promo codes not re-checked (run manuallyRedeemCodes() to force)", buffer);
 				}
@@ -1066,8 +1326,8 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 		return Promise.resolve({ success: false, message: "Code redemption is disabled in config" });
 	}
 
-	const game = new Game(gameName, config[gameName]);
-	const accounts = config[gameName].data;
+	const game = new Game(gameName, { data: getCookies(gameName) });
+	const accounts = getCookies(gameName);
 
 	if (accounts.length === 0) {
 		logNotification("warn", gameName, "No accounts provided. Cannot redeem codes.");
