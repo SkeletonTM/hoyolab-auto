@@ -464,6 +464,40 @@ function load (overrides = {}) {
 		assert.strictEqual(res.permanent, undefined, "no permanent flag for generic error");
 	});
 
+	// 25b. tight permanent classification (regression for over-broad regex)
+	await t("redeemCode blocks 'not available in your region' as permanent", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: 1, message: "This code is not available in your region" }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.permanent, true, "region+not available (word order 2) is permanent");
+	});
+	await t("redeemCode blocks platform-locked message as permanent", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: 1, message: "This code cannot be redeemed on this platform" }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.permanent, true, "platform reject is permanent");
+	});
+	await t("redeemCode does NOT block transient 'not available yet' wording", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: 1, message: "The code is not available yet, please try again later" }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.permanent, undefined, "'not yet'/'try again' must not block");
+	});
+	await t("redeemCode does NOT block transient 'temporarily unavailable' wording", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: 1, message: "Service temporarily unavailable, try again later" }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.permanent, undefined, "'temporar'/'try again' must not block");
+	});
+
 	// 26. blocklist persistence helpers
 	await t("getBlockedCodes/saveBlockedCodes persist per-uid blocklist", async () => {
 		const api = load();
