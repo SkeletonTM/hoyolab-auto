@@ -473,8 +473,11 @@ function flushDiscordNotifications () {
 	const { intro, outro } = juFufuContextualLines(NOTIFICATIONS);
 	// ">>> " on every report line marks it as a block-quote, visually
 	// separating Ju Fufu's commentary from the data she's reporting.
+	// Discord renders ">>> " as a quote until the NEXT BLANK LINE, so the
+	// outro needs a blank line before it — otherwise her sign-off gets
+	// swallowed into the quoted report block.
 	const quoted = body.split("\n").map(line => `>>> ${line}`).join("\n");
-	const wrapped = `${intro}\n${quoted}\n${outro}`;
+	const wrapped = `${intro}\n${quoted}\n\n${outro}`;
 	const chunks = splitMessage(wrapped, 1900); // Discord content limit is 2000
 
 	const discordUserId = getDiscordUserId();

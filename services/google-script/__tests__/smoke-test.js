@@ -316,6 +316,36 @@ function load (overrides = {}) {
 			j(["ℹ️ [G] Alice: no active promo codes right now"]));
 	});
 
+	// 16b. Discord blockquote layout: every report line gets a ">>> " prefix,
+	// but the outro (Ju Fufu's sign-off) must sit OUTSIDE the quote block —
+	// Discord renders ">>>" until the next blank line, so the sign-off needs a
+	// blank line before it or it gets swallowed into the quote.
+	await t("outro is separated from the quoted report by a blank line", async () => {
+		const api = load({
+			"getGameRecordCard": RECORD_CARD,
+			"/info?act_id": SIGN_INFO_FRESH,
+			"/home?act_id": AWARDS,
+			"/sign": SIGN_OK,
+			"api.ennead.cc": ENNEAD,
+			"raw.githubusercontent.com": HUMBAO,
+			"webExchangeCdkey": REDEEM_OK,
+			"webExchangeCdkeyRisk": REDEEM_OK
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0];
+		const lines = msg.split("\n");
+		const reportLines = lines.filter(l => l.startsWith(">>> "));
+		assert.ok(reportLines.length > 0, "report lines are quoted");
+		// outro is the last non-empty line and is NOT prefixed with ">>> "
+		const lastNonEmpty = [...lines].reverse().find(l => l.trim() !== "");
+		const outroIdx = lines.lastIndexOf(lastNonEmpty);
+		assert.ok(outroIdx > -1, "outro present");
+		const lastQuoteIdx = lines.map((l, i) => l.startsWith(">>> ") ? i : -1).filter(i => i > -1).pop();
+		assert.strictEqual(outroIdx, lastQuoteIdx + 2, "blank line between last quoted line and outro");
+		assert.ok(!lines[outroIdx].startsWith(">>>"), "outro itself is not quoted");
+	});
+
 	// 17. two accounts of the same game -> BOTH redeem, keys stored per uid
 	await t("2 accounts of one game: both redeem, redeemed stored separately by uid", async () => {
 		// getGameRecordCard must return a DIFFERENT game_role_id per ltuid so the
