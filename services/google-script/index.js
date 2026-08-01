@@ -762,6 +762,9 @@ class Game {
 				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
 				}, { withReferer: true }),
+				// act_id identifies the check-in event; without it the server
+				// answers "Parameter error" (-1005 / -400005).
+				payload: JSON.stringify(payload)
 			};
 
 			const response = UrlFetchApp.fetch(this.config.url.sign, options);
