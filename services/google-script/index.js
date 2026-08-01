@@ -1146,6 +1146,16 @@ class Game {
 					console.error(`API busy for code ${code} in ${this.fullName}: ${data.message}`);
 					return { success: false, busy: true, message: "API busy — retry later" };
 				}
+				// Permanent rejects: region-locked or platform-locked codes. HoYoLAB
+				// returns these for codes that will NEVER redeem on this account
+				// (e.g. "Your current region is not eligible...", "This code cannot
+				// be redeemed on this platform"). Classified by message text — there
+				// are no documented retcodes for these. Persisted per account and
+				// skipped in later runs, so they don't spam the report as ❌ daily.
+				if (/region|platform|eligible|not available|not applicable/i.test(data.message || "")) {
+					console.log(`Code ${code} permanently not eligible for ${this.fullName}: ${data.message}`);
+					return { success: false, permanent: true, message: data.message || "Code not eligible for this account" };
+				}
 				console.error(`Code ${code} redemption failed for ${this.fullName}:`, data);
 				return { success: false, message: data.message || `retcode ${data.retcode}` };
 			}
