@@ -116,25 +116,55 @@ Promo codes are grouped per account — one line for newly claimed codes, one co
 #### Storing cookies/secrets in Script Properties (optional, safer)
 
 Keeping cookies and the webhook URL in the source file is fine for a personal
-project, but if you ever share or push this file, they leak. The script
-supports storing them in Apps Script properties instead:
+project, but if you ever share or push this file, they leak. The script can
+read these values from Apps Script **Script Properties** instead.
+
+##### What to add
+
+Open the Apps Script editor, then go to **Project Settings** (gear icon on the
+left) → **Script Properties** → **Add script property**, and add:
 
 | Property key | Value |
 | --- | --- |
-| `COOKIE_genshin` / `COOKIE_honkai` / `COOKIE_starrail` / `COOKIE_zenless` | JSON array of cookie strings: `["ltoken_v2=…; ltuid_v2=…;", …]` |
-| `WEBHOOK_URL` | your Discord webhook URL |
-| `DISCORD_ID` | your Discord user ID (for error pings) |
+| `COOKIE_genshin` | JSON array of your Genshin cookie strings, e.g. `["ltoken_v2=…; ltuid_v2=…;", "ltoken_v2=…; ltuid_v2=…;"]` |
+| `COOKIE_honkai` | same, for Honkai Impact 3rd |
+| `COOKIE_starrail` | same, for Honkai: Star Rail |
+| `COOKIE_zenless` | same, for Zenless Zone Zero |
+| `WEBHOOK_URL` | your Discord webhook URL (optional) |
+| `DISCORD_ID` | your numeric Discord user ID, pings you on errors (optional) |
 
-Properties take precedence; if a key is missing the script falls back to the
-inline `config` / `DISCORD_WEBHOOK` / `DISCORD_USER_ID` values, so both styles
-work. Quick way to populate the properties: fill in the inline config as
-usual, run `storeSecretsFromConfig()` once from the toolbar, then blank the
-secrets out of the source.
+Each `COOKIE_<game>` value must be a **valid JSON array of strings** — one
+string per account, exactly the cookie you grabbed in step 2. If you only add
+`COOKIE_genshin`, only Genshin gets its cookies from properties; the other
+games fall back to `config`.
 
-Redeemed promo codes are remembered per account (`<game>_redeemed_codes_<uid>`
-in Script Properties), so a code redeemed by account A is still redeemed on
-account B of the same game. `resetAllRedeemedCodes()` and
-`viewAllRedeemedCodes()` handle both the legacy and the per-account keys.
+##### Two ways to fill them in
+
+**Way A — by hand (UI).** Project Settings → Script Properties → add each key
+and paste the JSON array. A single account looks like:
+
+```json
+["ltoken_v2=your_ltoken; ltuid_v2=your_ltuid; ltoken=…; ltuid=…"]
+```
+
+**Way B — automatic (`storeSecretsFromConfig`).** Fill the inline `config`
+and `DISCORD_WEBHOOK` as usual, save, then in the toolbar run
+`storeSecretsFromConfig()` **once**. It copies every non-empty cookie array
+and the webhook into Script Properties for you.
+
+##### After that
+
+- **Properties take precedence**: if a `COOKIE_<game>` key exists it is used;
+  otherwise the script falls back to the inline `config`. Same for
+  `WEBHOOK_URL` / `DISCORD_ID` vs `DISCORD_WEBHOOK` / `DISCORD_USER_ID`.
+- Once the properties are populated, you can **blank out the secrets in the
+  source** (empty `data: []` arrays, `DISCORD_WEBHOOK = null`) before pushing
+  or sharing the file — the script keeps working.
+- Redeemed promo codes are remembered per account
+  (`<game>_redeemed_codes_<uid>` in Script Properties), so a code redeemed by
+  account A is still redeemed on account B of the same game.
+  `resetAllRedeemedCodes()` and `viewAllRedeemedCodes()` handle both the
+  legacy and the per-account keys.
 
 ### 4. (Optional) Enable code redemption
 
