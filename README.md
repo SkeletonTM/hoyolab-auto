@@ -14,7 +14,7 @@ This is a fork of [torikushiii/hoyolab-auto](https://github.com/torikushiii/hoyo
 | Number of webhook POSTs per run | up to 4 × accounts | exactly 1 |
 | `checkInAllGames()` flushes the buffer | ❌ | ✅ |
 | `manuallyRedeemCodes()` flushes the buffer | ❌ (had no notifications at all) | ✅ |
-| Files in the repo | 100+ (Node.js, Docker, …) | 5 |
+| Files in the repo | 100+ (Node.js, Docker, …) | 7 |
 | Code source | `api.ennead.cc` (single source) | `api.ennead.cc` + [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) GitHub raw, merged in parallel |
 
 ## Repository layout
@@ -24,9 +24,12 @@ hoyolab-auto/
 ├── LICENSE                                  # AGPL-3.0, inherited from upstream
 ├── README.md                                # you are here
 ├── .gitignore
+├── package.json                             # "npm test" runs the smoke harness
 ├── services/
 │   └── google-script/
-│       └── index.js                         # the actual script — paste this into Apps Script
+│       ├── index.js                         # the actual script — paste this into Apps Script
+│       └── __tests__/
+│           └── smoke-test.js                # GAS-stub test harness
 └── setup/
     └── DISCORD_WEBHOOK.md                   # how to create a Discord webhook URL
 ```
