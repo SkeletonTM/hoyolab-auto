@@ -49,6 +49,7 @@ In the same editor, scroll to the top of the file. You'll see:
 const config = {
 	enableCodeRedemption: false, // set to true once everything else works
 	redeemCodesEvenIfSignedIn: false, // true = also redeem codes for accounts already signed in today
+	redeemSleepMs: 6000, // pause between individual redemption requests (rate-limit throttle)
 	genshin:  { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
 	honkai:   { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
 	starrail: { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
@@ -91,6 +92,29 @@ With the webhook set, **every** run ends with a single Discord message that look
 ```
 
 Promo codes are grouped per account — one line for newly claimed codes, one compact summary line for the rest — instead of a line per code.
+
+#### Storing cookies/secrets in Script Properties (optional, safer)
+
+Keeping cookies and the webhook URL in the source file is fine for a personal
+project, but if you ever share or push this file, they leak. The script
+supports storing them in Apps Script properties instead:
+
+| Property key | Value |
+| --- | --- |
+| `COOKIE_genshin` / `COOKIE_honkai` / `COOKIE_starrail` / `COOKIE_zenless` | JSON array of cookie strings: `["ltoken_v2=…; ltuid_v2=…;", …]` |
+| `WEBHOOK_URL` | your Discord webhook URL |
+| `DISCORD_ID` | your Discord user ID (for error pings) |
+
+Properties take precedence; if a key is missing the script falls back to the
+inline `config` / `DISCORD_WEBHOOK` / `DISCORD_USER_ID` values, so both styles
+work. Quick way to populate the properties: fill in the inline config as
+usual, run `storeSecretsFromConfig()` once from the toolbar, then blank the
+secrets out of the source.
+
+Redeemed promo codes are remembered per account (`<game>_redeemed_codes_<uid>`
+in Script Properties), so a code redeemed by account A is still redeemed on
+account B of the same game. `resetAllRedeemedCodes()` and
+`viewAllRedeemedCodes()` handle both the legacy and the per-account keys.
 
 ### 4. (Optional) Enable code redemption
 
