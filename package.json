@@ -4,6 +4,6 @@
   "private": true,
   "description": "HoyoLab Auto — Google Apps Script edition (test harness)",
   "scripts": {
-    "test": "node __tests__/smoke-test.js"
+    "test": "node services/google-script/__tests__/smoke-test.js"
   }
 }
