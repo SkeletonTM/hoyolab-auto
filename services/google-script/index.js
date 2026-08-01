@@ -733,7 +733,8 @@ class Game {
 			// CAPTCHA challenge with `gt_result.is_risk` even when retcode is 0,
 			// so this check must come before the generic retcode check. Report it
 			// as a distinct, actionable warning instead of a misleading success.
-			if (data?.data?.gt_result?.is_risk === 1) {
+			// is_risk is a boolean (true/false), so a truthy check is required.
+			if (data?.data?.gt_result?.is_risk) {
 				console.error(`${this.fullName}:sign`, "Blocked by risk/CAPTCHA check.", data);
 				return { success: false, riskBlocked: true };
 			}
@@ -1044,7 +1045,8 @@ class Game {
 
 			// Check for authentication errors and other failures
 			// HoYoLAB's risk-gate can appear even with retcode 0, so check it first.
-			if (data?.data?.gt_result?.is_risk === 1) {
+			// is_risk is a boolean (true/false), so a truthy check is required.
+			if (data?.data?.gt_result?.is_risk) {
 				const msg = "blocked by risk/CAPTCHA check — slow down or solve manually";
 				console.error(`Risk/CAPTCHA gate for code ${code} in ${this.fullName}: ${data.message || ""}`);
 				return { success: false, captcha: true, message: msg };
