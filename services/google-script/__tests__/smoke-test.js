@@ -105,7 +105,7 @@ function load (overrides = {}) {
 		// activate the config for tests
 		.replace("enableCodeRedemption: false", "enableCodeRedemption: true")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/test"');
-	vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, config, NOTIFICATIONS, extractLtuid, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport };", sandbox);
+	vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, config, NOTIFICATIONS, extractLtuid, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game };", sandbox);
 	return sandbox.__api;
 }
 
@@ -443,6 +443,24 @@ function load (overrides = {}) {
 		assert.ok(msg.includes("server unavailable") && msg.includes("skipping remaining codes"), "429 early-stop message");
 		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
 		assert.deepStrictEqual(stored, [], "nothing persisted on 429");
+	});
+
+	// 25. permanent classification: region/platform-locked messages
+	await t("redeemCode classifies region-locked message as permanent", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: 1, message: "Your current region is not eligible for the use of this redemption code." }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.permanent, true, "permanent flag set for region reject");
+	});
+	await t("redeemCode leaves unrelated errors non-permanent", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: 1, message: "Something unexpected happened" }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.permanent, undefined, "no permanent flag for generic error");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
