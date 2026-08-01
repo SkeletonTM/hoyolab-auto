@@ -48,7 +48,7 @@ function resetAllRedeemedCodes () {
 	let cleared = 0;
 	const all = props.getProperties();
 	for (const key of Object.keys(all)) {
-		if ([...prefix].some(p => key.startsWith(p)) && key.includes("redeemed_codes")) {
+		if ([...prefix].some(p => key.startsWith(p)) && (key.includes("redeemed_codes") || key.includes("blocked_codes"))) {
 			props.deleteProperty(key);
 			cleared++;
 		}
@@ -56,13 +56,13 @@ function resetAllRedeemedCodes () {
 	console.log(`Redeemed codes cleared (${cleared} key(s)).`);
 }
 
-// Function to view all stored redeemed codes (legacy + per-account keys)
+// Function to view all stored redeemed codes + blocked codes (legacy + per-account keys)
 function viewAllRedeemedCodes () {
 	const props = PropertiesService.getScriptProperties();
 	const all = props.getProperties();
 	const allCodes = {};
 	for (const key of Object.keys(all)) {
-		if (!key.includes("redeemed_codes")) continue;
+		if (!key.includes("redeemed_codes") && !key.includes("blocked_codes")) continue;
 		const value = all[key];
 		try {
 			allCodes[key] = JSON.parse(value);
@@ -1017,17 +1017,25 @@ class Game {
 	// Force redemption of all codes regardless of previous redemption status
 	async forceRedeemCodes (account, buffer) {
 		const codes = await this.fetchCodes(buffer);
+		const blockedCodes = this.getBlockedCodes(account.uid);
 
 		const claimed = [];
 		const skipped = [];
 		const expired = [];
 		const failed = [];
 		const cooldown = [];
+		const blocked = [];
+		const newBlocked = [];
 		const newlyRedeemed = [];
 
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
 			console.log(`Attempting to redeem code ${code.code} for ${this.fullName}`);
+			if (blockedCodes.includes(code.code)) {
+				console.log(`Code ${code.code} blocked for ${this.fullName} (permanent reject)`);
+				blocked.push(code.code);
+				continue;
+			}
 			const result = await this.redeemCode(account, code.code);
 
 			// Stop early on server-down / dead cookie / CAPTCHA, same as redeemCodes.
@@ -1067,6 +1075,10 @@ class Game {
 				// API busy (retcode -1048): transient, retry-worthy — same as cooldown.
 				cooldown.push(code.code);
 			}
+			else if (result && result.permanent) {
+				// Region/platform-locked: remember so future force runs skip it.
+				newBlocked.push(code.code);
+			}
 			else {
 				failed.push(`${code.code} — ${truncateMsg(String(result ? result.message : "Unknown error"))}`);
 			}
@@ -1075,8 +1087,11 @@ class Game {
 		if (newlyRedeemed.length > 0) {
 			this.saveRedeemedCodes(newlyRedeemed, account.uid);
 		}
+		if (newBlocked.length > 0) {
+			this.saveBlockedCodes(newBlocked, account.uid);
+		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, [], [], true));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, true));
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
