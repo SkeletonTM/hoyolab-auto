@@ -393,7 +393,7 @@ function juFufuContextualLines (lines) {
 //   🎁 [Game] Nick: +2 new — CODE1, CODE2
 //   ⏭️ [Game] Nick: nothing new (11 already redeemed, 2 expired)
 //   ❌ [Game] Nick: 1 failed — CODE3 (Invalid cookie)
-function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], isForce = false) {
+function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], blocked = [], newBlocked = [], isForce = false) {
 	const lines = [];
 	const nick = `${account.nickname} (${account.uid})`.replace(UID_PAREN_RE, "");
 	const label = isForce ? `${nick} (force-run)` : nick;
@@ -411,19 +411,26 @@ function formatCodeReport (gameName, account, total, claimed, skipped, expired, 
 	if (cooldown.length > 0) {
 		lines.push(`⚠️ [${gameName}] ${label}: ${cooldown.length} in cooldown — retried next run`);
 	}
+	// Newly blocked codes: region/platform-locked, rejected once and remembered
+	// — report them exactly once so the user knows why they vanished.
+	if (newBlocked.length > 0) {
+		lines.push(`🚫 [${gameName}] ${label}: not eligible for this account — ${newBlocked.join(", ")}`);
+	}
 	// The quiet line: only when there's nothing exciting to say, or to account
 	// for the remaining codes after a partial success.
-	const quietCount = skipped.length + expired.length;
-	if (claimed.length === 0 && failed.length === 0 && cooldown.length === 0) {
+	const quietCount = skipped.length + expired.length + blocked.length;
+	if (claimed.length === 0 && failed.length === 0 && cooldown.length === 0 && newBlocked.length === 0) {
 		const parts = [];
 		if (skipped.length > 0) parts.push(`${skipped.length} already redeemed`);
 		if (expired.length > 0) parts.push(`${expired.length} expired`);
+		if (blocked.length > 0) parts.push(`${blocked.length} not eligible`);
 		lines.push(`⏭️ [${gameName}] ${label}: nothing new (${parts.join(", ") || "0 active codes"})`);
 	}
 	else if (quietCount > 0) {
 		const parts = [];
 		if (skipped.length > 0) parts.push(`${skipped.length} already redeemed`);
 		if (expired.length > 0) parts.push(`${expired.length} expired`);
+		if (blocked.length > 0) parts.push(`${blocked.length} not eligible`);
 		lines.push(`⏭️ [${gameName}] ${label}: rest — ${parts.join(", ")}`);
 	}
 	if (total === 0) {
@@ -912,6 +919,7 @@ class Game {
 	async redeemCodes (account, buffer) {
 		const codes = await this.fetchCodes(buffer);
 		const redeemedCodes = this.getRedeemedCodes(account.uid);
+		const blockedCodes = this.getBlockedCodes(account.uid);
 
 		// Collect outcomes per code, then emit ONE grouped block per account
 		// instead of a line per code — with ~10 active codes the old per-line
@@ -921,6 +929,8 @@ class Game {
 		const expired = [];
 		const failed = [];
 		const cooldown = [];
+		const blocked = [];      // already in the per-account blocklist — silent
+		const newBlocked = [];   // just rejected as permanent — reported once
 		const newlyRedeemed = []; // batched, persisted once below
 
 		for (let i = 0; i < codes.length; i++) {
@@ -928,6 +938,11 @@ class Game {
 			if (redeemedCodes.includes(code.code)) {
 				console.log(`Code ${code.code} already redeemed for ${this.fullName}`);
 				skipped.push(code.code);
+				continue;
+			}
+			if (blockedCodes.includes(code.code)) {
+				console.log(`Code ${code.code} blocked for ${this.fullName} (permanent reject)`);
+				blocked.push(code.code);
 				continue;
 			}
 
@@ -976,6 +991,12 @@ class Game {
 				// cooldown — don't persist, don't report as a failure.
 				cooldown.push(code.code);
 			}
+			else if (result && result.permanent) {
+				// Region/platform-locked: will NEVER redeem for this account.
+				// Persist to the blocklist and report once, so it stops being
+				// retried (and ❌-ing) on every future run.
+				newBlocked.push(code.code);
+			}
 			else {
 				const msg = String(result ? result.message : "Unknown error");
 				failed.push(`${code.code} (${truncateMsg(msg)})`);
@@ -986,8 +1007,11 @@ class Game {
 		if (newlyRedeemed.length > 0) {
 			this.saveRedeemedCodes(newlyRedeemed, account.uid);
 		}
+		if (newBlocked.length > 0) {
+			this.saveBlockedCodes(newBlocked, account.uid);
+		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked));
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
@@ -1052,7 +1076,7 @@ class Game {
 			this.saveRedeemedCodes(newlyRedeemed, account.uid);
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, true));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, [], [], true));
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}

@@ -476,6 +476,29 @@ function load (overrides = {}) {
 		assert.ok(!("zenless_blocked_codes_999" in properties), "no cross-account leak");
 	});
 
+	// 27. blocklist respected in daily redeem run
+	await t("blocked code skipped without API call; permanent reject saved + reported once", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [
+				{ code: "BLOCKED1", rewards: ["x"] },
+				{ code: "NEWBAD1", rewards: ["y"] }
+			] },
+			"raw.githubusercontent.com": "",
+			"webExchangeCdkey": { retcode: 1, message: "Your current region is not eligible for the use of this redemption code." }
+		});
+		properties["genshin_blocked_codes_800000001"] = JSON.stringify(["BLOCKED1"]);
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		const cdkeyHits = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		assert.strictEqual(cdkeyHits, 1, "only the new code hits the API — blocked one is skipped");
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("not eligible for this account"), "new permanent reject reported once");
+		assert.ok(msg.includes("NEWBAD1"), "rejected code named");
+		assert.ok(!msg.includes("❌"), "no ❌ line for region-locked code");
+		const blocked = JSON.parse(properties["genshin_blocked_codes_800000001"] || "[]");
+		assert.strictEqual(JSON.stringify(blocked), '["BLOCKED1","NEWBAD1"]', "new reject persisted to blocklist");
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();
