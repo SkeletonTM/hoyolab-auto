@@ -55,7 +55,7 @@ transient handling, legacy-key migration, and the Discord report format.
 
 ### 1. Create the script
 
-1. Open [https://script.google.com/](https://script.google.com/) and click **+ New project**.
+1. Open [script.google.com](https://script.google.com/) and click **+ New project**.
 2. Delete the placeholder `function myFunction() { … }` in the editor.
 3. Open [`services/google-script/index.js`](services/google-script/index.js) in this repo, select all, copy, and paste it into the Apps Script editor.
 4. Click the 💾 floppy-disk icon to save. Name the project anything you like (e.g. "HoyoLab Auto").
@@ -172,7 +172,7 @@ For Honkai Impact 3rd, code redemption is not supported by this script.
 
 The script pulls the list of currently-active promo codes from **two** community-maintained aggregators in parallel and merges the results (deduplicated by code):
 
-- [api.ennead.cc](https://api.ennead.cc) — torikushiii's JSON aggregator (~300 ms)
+- [api.ennead.cc](https://api.ennead.cc/mihoyo/genshin/codes) — torikushiii's JSON aggregator (~300 ms)
 - [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) — GitHub-hosted txt files (~12 ms, updated daily at 1:15 PST)
 
 Why two? `api.ennead.cc` is one person's Cloudflare project with no SLA; the GitHub raw URL is a CDN-fronted fallback. Hitting both in parallel means a single outage does not block code redemption, and the second source often picks up codes the first missed (region-locked codes, livestream codes, etc.). The cost is negligible: the two requests run in parallel via `Promise.allSettled`, so wall-clock latency is the slower of the two, not the sum. If both fail the run reports 0 codes and moves on, same as the original single-source behaviour.
@@ -283,8 +283,8 @@ You can also set **two triggers** if you want each region to be picked up as clo
 The HoYoLAB API (or one of the code sources) is temporarily down or rate
 limiting. This is transient — nothing is broken on your side, no codes are
 marked redeemed, and the next trigger run will simply try again. If it
-persists for hours, check [status.hoyolab.com](https://status.hoyolab.com)
-or the [HoyoLab support page](https://www.hoyolab.com/accountCenter/postList?id=2).
+persists for hours, check the official HoYoLAB news/announcements or retry
+the run manually once the servers are back.
 
 **The report says "Cookie is missing ltuid/ltuid_v2".**
 The cookie string you pasted doesn't contain an `ltuid` or `ltuid_v2` field — usually a partial copy or an expired login. Re-grab the full cookie following step 2 (from the `getGameRecordCard` request), making sure you copy the entire `cookie` header value.
