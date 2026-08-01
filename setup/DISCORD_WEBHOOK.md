@@ -1,41 +1,66 @@
 # Discord Webhooks
-This is an **OPTIONAL** feature. If you want to receive a Discord notification when the check-in is successful or any other features that you have enabled, you can create a Discord webhook and paste the value into the `config.json5` file.
 
-1. Go to edit channel settings. (Create your own server if you don't have one.)
+This is an **OPTIONAL** feature. If you want to receive a Discord notification
+when the check-in runs (including codes redeemed and errors), create a Discord
+webhook and put its URL into the script.
+
+## 1. Create a webhook in your Discord server
+
+1. Go to your server's settings (create a server first if you don't have one).
 
    ![](https://i.imgur.com/FWfK3My.png)
 
-2. Go to the "Integrations" tab and click on "Create Webhook".
+2. Open the **Integrations** tab and click **Create Webhook**.
 
    ![](https://i.imgur.com/DnELZJl.png)
 
-3. Create a name for your webhook and click on "Copy Webhook URL".
+3. Give the webhook a name (e.g. "HoyoLab Auto") and click **Copy Webhook URL**.
 
    ![](https://i.imgur.com/AkfTTBB.png)
 
-4. Click on "Save Changes".
+4. Optional: add `-avatar` customization in Discord settings if you want a custom icon.
 
-   ![](https://i.imgur.com/KFYeonU.png)
+## 2. Wire the URL into the script
 
-5. Paste the URL into the `webhook > url` field at the `default.config.json5` or `config.json5` file.
+You have two options — **Script Properties** is safer if you ever push/share the
+source file; the inline constant is simpler for a personal project.
 
-   ![](https://github.com/torikushiii/hoyolab-auto/assets/21153445/ed9960b4-447e-450a-860e-ae49b0610bcf)
+**Option A — inline constant (simplest):**
 
-   - And it would look like this
-   ```json
-   {
-       "webhook": {
-            id: 3,
-            active: true, // Remember to set this to true
-            type: "webhook",
-            url: "https://discord.com/api/webhooks/1234567890/ABCDEFGHIJKLMN1234567890"
-       }
-   }
-   ```
-6. You should receive a Discord notification when the check-in is successful.
+In `services/google-script/index.js`, find:
 
-   ![](https://github.com/torikushiii/hoyolab-auto/assets/21153445/5c60a56a-f6ee-4d8e-b6ac-4b1df91866ae)
+```javascript
+const DISCORD_WEBHOOK = null; // Replace with your Discord webhook URL (optional)
+```
 
-7. And if you enable stamina check or expedition check, you should receive a Discord notification when your stamina is above your set threshold or when your expedition is done.
+and replace `null` with your webhook URL inside quotes:
 
-   ![](https://github.com/torikushiii/hoyolab-auto/assets/21153445/a9a39b9a-e2aa-46ce-b8bc-ffce5341ada5)
+```javascript
+const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/…";
+```
+
+**Option B — Script Properties (keeps secrets out of the file):**
+
+In the Apps Script editor, open **Project Settings → Script Properties** and add:
+
+| Key | Value |
+| --- | --- |
+| `WEBHOOK_URL` | your Discord webhook URL |
+| `DISCORD_ID` | (optional) your numeric Discord user ID, pings you on errors |
+
+The script prefers the properties value and falls back to the inline constant,
+so either style works. To copy the inline values into properties quickly, run
+`storeSecretsFromConfig()` once from the toolbar, then blank them out of the source.
+
+## 3. Verify
+
+Run `checkInAllGames()` once manually. Within a few seconds you should see a
+single Discord message in the channel: a short Ju Fufu voice line, the check-in
+report (grouped per account), and promo-code lines if redemption is enabled.
+
+If nothing arrives:
+
+- The URL must be the full `https://discord.com/api/webhooks/…` value.
+- If every account was already signed in and there were no code events or
+  errors, the buffer is empty and the script deliberately sends nothing.
+- Check the **Executions** tab for a `flushDiscordNotifications` error.

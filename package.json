@@ -1,0 +1,9 @@
+{
+  "name": "hoyolab-auto-google-script",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HoyoLab Auto — Google Apps Script edition (test harness)",
+  "scripts": {
+    "test": "node __tests__/smoke-test.js"
+  }
+}
