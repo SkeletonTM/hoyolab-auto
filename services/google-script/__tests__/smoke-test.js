@@ -48,6 +48,7 @@ function makeSandbox () {
 		PropertiesService: {
 			getScriptProperties: () => ({
 				getProperty: k => (k in properties ? properties[k] : null),
+				getProperties: () => Object.assign({}, properties),
 				setProperty: (k, v) => { properties[k] = v; },
 				deleteProperty: k => { delete properties[k]; }
 			})
@@ -497,6 +498,26 @@ function load (overrides = {}) {
 		assert.ok(!msg.includes("❌"), "no ❌ line for region-locked code");
 		const blocked = JSON.parse(properties["genshin_blocked_codes_800000001"] || "[]");
 		assert.strictEqual(JSON.stringify(blocked), '["BLOCKED1","NEWBAD1"]', "new reject persisted to blocklist");
+	});
+
+	// 28. force run respects blocklist; reset/view include blocked keys
+	await t("forceRedeemCodes skips blocked codes; reset clears them; view lists them", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [{ code: "BLOCKED1", rewards: ["x"] }, { code: "OKCODE1", rewards: ["y"] }] },
+			"raw.githubusercontent.com": ""
+		});
+		properties["genshin_blocked_codes_800000001"] = JSON.stringify(["BLOCKED1"]);
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", true); // force run
+		const cdkeyHits = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		assert.strictEqual(cdkeyHits, 1, "force run skips blocked code too");
+		// view shows blocked keys
+		let viewed = api.viewAllRedeemedCodes();
+		assert.ok(JSON.stringify(viewed).includes("blocked_codes"), "viewAllRedeemedCodes lists blocked keys");
+		// reset clears both redeemed and blocked
+		api.resetAllRedeemedCodes();
+		assert.ok(!("genshin_blocked_codes_800000001" in properties), "reset removes blocked key");
+		assert.ok(!("genshin_redeemed_codes_800000001" in properties), "reset removes redeemed key");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
