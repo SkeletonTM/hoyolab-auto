@@ -151,7 +151,10 @@ function browserHeaders (cookie, extra = {}, opts = {}) {
 	const base = {
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
 		Accept: "application/json, text/plain, */*",
-		"Accept-Encoding": "gzip, deflate, br",
+		// NO "br": Google Apps Script UrlFetchApp auto-decodes gzip/deflate but
+		// not brotli; advertising br makes api.ennead.cc respond with brotli
+		// and the JSON parse breaks. gzip is always offered by the servers.
+		"Accept-Encoding": "gzip, deflate",
 		Connection: "keep-alive",
 		"x-rpc-app_version": "2.71.0",
 		"x-rpc-client_type": "4",
@@ -652,25 +655,25 @@ class Game {
 					},
 					award: awardObject
 				});
-			}
-			catch (e) {
-				console.error(`${this.fullName}:CheckIn`, e);
-				const msg = String(e?.message || e);
-				// getAccountDetails throws human-readable messages for cookie
-				// problems; pass those through rather than a generic wrapper.
-				logNotification("error", this.fullName,
-					msg.startsWith("cookie invalid/expired") ? msg : `Unexpected error: ${msg}`, buffer);
-			}
-			}
+		}
+		catch (e) {
+			console.error(`${this.fullName}:CheckIn`, e);
+			const msg = String(e?.message || e);
+			// getAccountDetails throws human-readable messages for cookie
+			// problems; pass those through rather than a generic wrapper.
+			logNotification("error", this.fullName,
+				msg.startsWith("cookie invalid/expired") ? msg : `Unexpected error: ${msg}`, buffer);
+		}
+	}
 
-			return success;
-			}
+	return success;
+}
 
-			// The record-card endpoint returns every game profile for the account in one
-			// response; cache it per ltuid for the duration of this run so multi-game
-			// accounts don't trigger one extra request per game.
-			async getAccountDetails (cookieData, ltuid) {
-			try {
+// The record-card endpoint returns every game profile for the account in one
+// response; cache it per ltuid for the duration of this run so multi-game
+// accounts don't trigger one extra request per game.
+	async getAccountDetails (cookieData, ltuid) {
+		try {
 			let data = this._recordCardCache.get(ltuid);
 			if (!data) {
 				const options = {
@@ -705,12 +708,12 @@ class Game {
 				rank: accountData.level,
 				region: this.fixRegion(accountData.region)
 			};
-			}
-			catch (e) {
+		}
+		catch (e) {
 			console.error(`${this.fullName}:login`, `Error: ${e?.message || String(e)}`);
 			throw e; // Re-throw to be handled by the caller
-			}
-			}
+		}
+	}
 
 	async sign (cookieData) {
 		try {
@@ -915,6 +918,11 @@ class Game {
 				// Transient cooldown: NOT redeemed, NOT persisted — retried later.
 				cooldown.push(code.code);
 			}
+			else if (result && result.busy) {
+				// API busy (retcode -1048): transient, retry-worthy. Treat like
+				// cooldown — don't persist, don't report as a failure.
+				cooldown.push(code.code);
+			}
 			else {
 				const msg = String(result ? result.message : "Unknown error");
 				failed.push(`${code.code} (${truncateMsg(msg)})`);
@@ -971,6 +979,10 @@ class Game {
 				expired.push(code.code);
 			}
 			else if (result && result.cooldown) {
+				cooldown.push(code.code);
+			}
+			else if (result && result.busy) {
+				// API busy (retcode -1048): transient, retry-worthy — same as cooldown.
 				cooldown.push(code.code);
 			}
 			else {
@@ -1194,7 +1206,7 @@ class Game {
 	saveRedeemedCodes (codes, uid) {
 		const props = PropertiesService.getScriptProperties();
 		const uidKey = `${this.name}_redeemed_codes_${uid}`;
-		let redeemedCodes;
+		let redeemedCodes = [];
 		const existing = props.getProperty(uidKey);
 		if (existing) {
 			try {
@@ -1205,7 +1217,16 @@ class Game {
 			}
 		}
 		else {
-			redeemedCodes = [];
+			// First write for this account: seed from the legacy per-game key so
+			// codes redeemed before the per-account migration aren't retried.
+			const legacy = props.getProperty(`${this.name}_redeemed_codes`);
+			if (legacy) {
+				try {
+					const arr = JSON.parse(legacy);
+					if (Array.isArray(arr)) redeemedCodes = arr;
+				}
+				catch (e) { /* ignore malformed legacy value */ }
+			}
 		}
 		for (const code of codes) {
 			if (!redeemedCodes.includes(code)) {
