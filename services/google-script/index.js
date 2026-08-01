@@ -1187,13 +1187,23 @@ class Game {
 				}
 				// Permanent rejects: region-locked or platform-locked codes. HoYoLAB
 				// returns these for codes that will NEVER redeem on this account
-				// (e.g. "Your current region is not eligible...", "This code cannot
-				// be redeemed on this platform"). Classified by message text — there
-				// are no documented retcodes for these. Persisted per account and
-				// skipped in later runs, so they don't spam the report as ❌ daily.
-				if (/region|platform|eligible|not available|not applicable/i.test(data.message || "")) {
-					console.log(`Code ${code} permanently not eligible for ${this.fullName}: ${data.message}`);
-					return { success: false, permanent: true, message: data.message || "Code not eligible for this account" };
+				// (e.g. "Your current region is not eligible...", "This code is not
+				// available in your region", "This code cannot be redeemed on this
+				// platform"). Classified by message text — there are no documented
+				// retcodes for these. Persisted per account and skipped in later
+				// runs, so they don't spam the report as ❌ daily.
+				//
+				// The regex is deliberately narrow (region/platform + a rejection
+				// verb in either order) and excludes transient wording ("temporarily",
+				// "try again", "not yet") so a code that is merely unavailable for
+				// now is never locked forever.
+				const msg = data.message || "";
+				const permanentReject = (
+					/region.*(not eligible|not applicable|not available)|(not eligible|not applicable|not available).*region|cannot be redeemed on this platform/i.test(msg)
+				) && !/temporar|try again|please try|unavailable for now|not yet/i.test(msg);
+				if (permanentReject) {
+					console.log(`Code ${code} permanently not eligible for ${this.fullName}: ${msg}`);
+					return { success: false, permanent: true, message: msg || "Code not eligible for this account" };
 				}
 				console.error(`Code ${code} redemption failed for ${this.fullName}:`, data);
 				return { success: false, message: data.message || `retcode ${data.retcode}` };
