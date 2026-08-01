@@ -36,6 +36,7 @@ const REDEEM_ALREADY = { retcode: -2017, message: "Redemption code has been used
 const REDEEM_EXPIRED = { retcode: -2001, message: "Expired redemption code" };
 
 let fetchLog = [];
+let signBodies = []; // POST bodies captured from /sign requests (regression: act_id payload)
 let responseMap = {};
 let properties = {};
 let postedToDiscord = [];
@@ -56,6 +57,7 @@ function makeSandbox () {
 		UrlFetchApp: {
 			fetch: (url, opts = {}) => {
 				fetchLog.push(url);
+				if (url.includes("/sign") && opts && opts.method === "POST") signBodies.push(opts.payload || "");
 				for (const [pattern, responder] of Object.entries(responseMap)) {
 					if (url.includes(pattern)) {
 						const body = typeof responder === "function" ? responder(url, opts) : responder;
@@ -78,7 +80,7 @@ function makeSandbox () {
 }
 
 function load (overrides = {}) {
-	fetchLog = []; postedToDiscord = [];
+	fetchLog = []; signBodies = []; postedToDiscord = [];
 	properties = {}; // fresh script-properties per scenario — tests must not leak state
 	// Object-spread would let defaults overwrite same-key overrides; instead
 	// build an ordered entries array where overrides always match first.
@@ -413,6 +415,17 @@ function load (overrides = {}) {
 		assert.ok(msg.includes("CAPTCHA") || msg.includes("risk"), "captcha/risk message reported");
 		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
 		assert.deepStrictEqual(stored, [], "nothing persisted when risk-blocked");
+	});
+
+	// 22b. sign() must send act_id in the POST body (regression for "Parameter
+	// error" -1005 / -400005 when the payload was dropped in the header refactor).
+	await t("sign sends act_id in POST body", async () => {
+		const api = load({ "/sign": { retcode: 0, message: "OK" } });
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		assert.ok(signBodies.length > 0, "sign POST body captured");
+		const parsed = JSON.parse(signBodies[0] || "{}");
+		assert.strictEqual(parsed.act_id, "e202102251931481", "act_id present in sign POST body");
 	});
 
 	// 23. HTTP 500/429 before JSON.parse -> transient warn, not "Cannot parse JSON"
