@@ -189,6 +189,7 @@ With that on, "already signed in" accounts are still skipped for check-in but ar
 - `-2016` (cooldown) / `-1048` (API busy) — transient → not remembered, retried on the next run
 - `-1071`/`-100`/`-10001` — cookie expired → stops trying the remaining codes for that account
 - `1034`/`10035`/`10041` or a `gt_result.is_risk` response — CAPTCHA/risk gate → stops and tells you to solve it manually
+- region/platform-locked (message says *"Your current region is not eligible…"*, *"This code cannot be redeemed on this platform"*, or similar) — permanently rejected → the code is added to a per-account **blocklist** in `PropertiesService` (`<game>_blocked_codes_<uid>`) and skipped on every later run, so it stops showing up as ❌ each day. The blocklist is reported once (🚫 line), is respected by force-redeem runs too, and is cleared together with redeemed codes by `resetAllRedeemedCodes()`.
 
 If you ever need to force-redeem a code (e.g. the API didn't return it in time), pick one of these functions in the toolbar and run it once:
 
