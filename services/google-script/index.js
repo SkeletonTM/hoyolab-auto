@@ -463,6 +463,9 @@ function splitMessage (text, maxLen) {
 
 function flushDiscordNotifications () {
 	const webhook = getWebhook();
+	// Diagnostic line: makes a missing webhook visible in Executions instead
+	// of failing silently (no webhook => no Discord message by design).
+	console.log("flushDiscordNotifications", webhook ? "webhook set" : "⚠️ WEBHOOK NOT SET — no message sent");
 	if (!webhook || NOTIFICATIONS.length === 0) {
 		NOTIFICATIONS.length = 0;
 		return;
@@ -487,12 +490,24 @@ function flushDiscordNotifications () {
 			content = `<@${discordUserId}> ${content}`;
 		}
 		try {
-			UrlFetchApp.fetch(webhook, {
+			const discordRes = UrlFetchApp.fetch(webhook, {
 				method: "POST",
 				contentType: "application/json",
 				payload: JSON.stringify({ content }),
 				muteHttpExceptions: true
 			});
+			const code = discordRes.getResponseCode();
+			if (code < 200 || code >= 300) {
+				// Discord did not accept the message (webhook deleted/invalid =
+				// 404, rate-limited = 429, ...). muteHttpExceptions:true means
+				// this is NOT thrown — log it so Executions shows the failure
+				// instead of silently dropping the report.
+				console.error("flushDiscordNotifications",
+					`Discord webhook responded HTTP ${code}: ${discordRes.getContentText()}`);
+			}
+			else {
+				console.log("flushDiscordNotifications", `Discord webhook accepted message (HTTP ${code})`);
+			}
 		}
 		catch (e) {
 			console.error("flushDiscordNotifications", `Failed to POST to Discord: ${e?.message || e}`);
