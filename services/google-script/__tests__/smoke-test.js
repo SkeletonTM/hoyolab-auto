@@ -346,6 +346,25 @@ function load (overrides = {}) {
 		assert.ok(!lines[outroIdx].startsWith(">>>"), "outro itself is not quoted");
 	});
 
+	// 16c. Discord webhook errors must be visible in Executions — with
+	// muteHttpExceptions:true a 404/429 response is NOT thrown, so the old code
+	// silently dropped the message. The fix logs the HTTP code + body.
+	await t("discord webhook 404 is logged, not silently dropped", async () => {
+		const errLog = [];
+		const origErr = console.error;
+		console.error = (...a) => errLog.push(a.join(" "));
+		try {
+			const api = load({
+				"discord.com": () => ({ getResponseCode: () => 404, getContentText: () => '{"message":"Unknown Webhook"}' })
+			});
+			api.config.genshin.data = [COOKIE];
+			await api.checkInAllGames();
+			assert.ok(errLog.some(l => l.includes("404")), "404 logged to Executions");
+		} finally {
+			console.error = origErr;
+		}
+	});
+
 	// 17. two accounts of the same game -> BOTH redeem, keys stored per uid
 	await t("2 accounts of one game: both redeem, redeemed stored separately by uid", async () => {
 		// getGameRecordCard must return a DIFFERENT game_role_id per ltuid so the
