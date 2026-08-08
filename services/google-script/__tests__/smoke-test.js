@@ -138,17 +138,17 @@ function load (overrides = {}) {
 		assert.deepStrictEqual(stored.sort(), ["TESTCODE1", "TESTCODE2"]);
 	});
 
-	// 3. record-card cache: 4 games, 1 account each -> 4 record-card calls, not 4+
-	await t("getGameRecordCard fetched once per account (cache works)", async () => {
+	// 3. record-card cache: 4 games, 1 account each -> ONE record-card call per
+	// ltuid shared across ALL Game instances (global cache), not one per game.
+	await t("getGameRecordCard fetched once per ltuid across games (global cache)", async () => {
 		const api = load();
 		api.config.genshin.data = [COOKIE];
 		api.config.starrail.data = [COOKIE];
 		api.config.zenless.data = [COOKIE];
+		api.config.honkai.data = [COOKIE];
 		await api.checkInAllGames();
 		const rcCalls = fetchLog.filter(u => u.includes("getGameRecordCard")).length;
-		// each Game instance has its own cache (per-game object), so 3 games = 3 calls max;
-		// the point is: no repeat calls *within* one game's multi-account loop.
-		assert.ok(rcCalls <= 3, `record-card calls ${rcCalls} <= 3`);
+		assert.strictEqual(rcCalls, 1, `record-card calls ${rcCalls} == 1 (one per ltuid, shared across games)`);
 	});
 
 	// 4. broken cookie -> clear error line, no TypeError
