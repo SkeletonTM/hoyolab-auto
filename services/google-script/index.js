@@ -766,7 +766,7 @@ class Game {
 			}
 			const data = await pending;
 
-			const accountData = data.data.list.find(account => account.game_id === this.config.gameId);
+			const accountData = data?.data?.list?.find(account => account.game_id === this.config.gameId);
 			if (!accountData) {
 				throw new Error(`No ${this.fullName} account found for ltuid: ${ltuid}`);
 			}
@@ -1163,13 +1163,13 @@ class Game {
 	}
 
 	async redeemCode (account, code) {
-		const url = this.getRedemptionUrl(account, code);
-		const options = {
-			method: this.name === "starrail" ? "POST" : "GET",
-			headers: browserHeaders(account.cookie)
-		};
-
 		try {
+			const url = this.getRedemptionUrl(account, code);
+			const options = {
+				method: this.name === "starrail" ? "POST" : "GET",
+				headers: browserHeaders(account.cookie)
+			};
+
 			const response = await UrlFetchApp.fetch(url, options);
 			const g = guardResponse(response);
 			if (g.transient) {
@@ -1390,6 +1390,10 @@ class Game {
 				redeemedCodes.push(code);
 			}
 		}
+		// Cap to the last 200 codes: Script Properties has a 9KB per-value limit
+		// (~500 codes with quotes/commas) and old codes are expired anyway, so a
+		// growing array would eventually make setProperty throw and break saving.
+		redeemedCodes = redeemedCodes.slice(-200);
 		props.setProperty(uidKey, JSON.stringify(redeemedCodes));
 	}
 
