@@ -571,6 +571,11 @@ function extractLtuid (cookie) {
 	return m ? m[1] : null;
 }
 
+// Record-card responses are keyed by ltuid and identical for every game the
+// account owns, so cache them at module level: one fetch per ltuid per run,
+// shared across all Game instances (checkInGame creates one instance per game).
+const GLOBAL_RECORD_CARD_CACHE = new Map();
+
 class Game {
 	/**
      * @param {string} name - The short name of the game (e.g., "genshin").
@@ -582,7 +587,6 @@ class Game {
 		this.config = { ...DEFAULT_CONSTANTS[name] };
 		this.data = config.data || [];
 		this._codesCache = null; // Per-run cache for fetchCodes()
-		this._recordCardCache = new Map(); // ltuid -> raw record-card payload
 
 		if (this.data.length === 0) {
 			console.warn(`No ${this.fullName} accounts provided. Skipping...`);
@@ -722,36 +726,45 @@ class Game {
 }
 
 // The record-card endpoint returns every game profile for the account in one
-// response; cache it per ltuid for the duration of this run so multi-game
-// accounts don't trigger one extra request per game.
+// response; cache the in-flight Promise per ltuid for the duration of this run
+// so multi-game accounts (games run concurrently via Promise.allSettled) don't
+// trigger one request per game. Caching the Promise — not just the resolved
+// value — is what dedupes the concurrent callers.
 	async getAccountDetails (cookieData, ltuid) {
 		try {
-			let data = this._recordCardCache.get(ltuid);
-			if (!data) {
-				const options = {
-					method: "GET",
-					headers: browserHeaders(cookieData)
-				};
+			let pending = GLOBAL_RECORD_CARD_CACHE.get(ltuid);
+			if (!pending) {
+				pending = (async () => {
+					const options = {
+						method: "GET",
+						headers: browserHeaders(cookieData)
+					};
 
-				const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
-				const response = await UrlFetchApp.fetch(url, options);
-				const g = guardResponse(response);
-				if (g.transient) {
-					throw new Error(`HoYoLAB server unavailable (HTTP ${g.status}) — try again later`);
-				}
-				data = JSON.parse(response.getContentText());
-
-				if (g.status !== 200 || data.retcode !== 0) {
-					// Surface the most common failure (stale/expired cookie) with a
-					// human-readable message instead of a raw retcode dump.
-					const retcode = data && data.retcode;
-					if (retcode === -100 || retcode === -10001) {
-						throw new Error(`cookie invalid/expired — grab a fresh one (README step 2) [retcode ${retcode}]`);
+					const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
+					const response = await UrlFetchApp.fetch(url, options);
+					const g = guardResponse(response);
+					if (g.transient) {
+						throw new Error(`HoYoLAB server unavailable (HTTP ${g.status}) — try again later`);
 					}
-					throw new Error(`Failed to login to ${this.fullName} account: ${JSON.stringify(data)}`);
-				}
-				this._recordCardCache.set(ltuid, data);
+					const data = JSON.parse(response.getContentText());
+
+					if (g.status !== 200 || data.retcode !== 0) {
+						// Surface the most common failure (stale/expired cookie) with a
+						// human-readable message instead of a raw retcode dump.
+						const retcode = data && data.retcode;
+						if (retcode === -100 || retcode === -10001) {
+							throw new Error(`cookie invalid/expired — grab a fresh one (README step 2) [retcode ${retcode}]`);
+						}
+						throw new Error(`Failed to login to ${this.fullName} account: ${JSON.stringify(data)}`);
+					}
+					return data;
+				})();
+				// Drop failed lookups so a transient error doesn't poison the
+				// cache for every game sharing this ltuid.
+				pending.catch(() => GLOBAL_RECORD_CARD_CACHE.delete(ltuid));
+				GLOBAL_RECORD_CARD_CACHE.set(ltuid, pending);
 			}
+			const data = await pending;
 
 			const accountData = data.data.list.find(account => account.game_id === this.config.gameId);
 			if (!accountData) {
