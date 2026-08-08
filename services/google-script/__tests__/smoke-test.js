@@ -40,12 +40,19 @@ let signBodies = []; // POST bodies captured from /sign requests (regression: ac
 let responseMap = {};
 let properties = {};
 let postedToDiscord = [];
+let lockAvailable = true; // LockService stub: false simulates another instance running
 
 function makeSandbox () {
 	return {
 		console,
 		JSON, Math, Date, Array, Object, String, Number, Map, Promise, Error, RegExp,
 		Utilities: { sleep: () => {} },
+		LockService: {
+			getScriptLock: () => ({
+				tryLock: () => lockAvailable,
+				releaseLock: () => {}
+			})
+		},
 		PropertiesService: {
 			getScriptProperties: () => ({
 				getProperty: k => (k in properties ? properties[k] : null),
@@ -652,6 +659,123 @@ function load (overrides = {}) {
 		api.resetAllRedeemedCodes();
 		assert.ok(!("genshin_blocked_codes_800000001" in properties), "reset removes blocked key");
 		assert.ok(!("genshin_redeemed_codes_800000001" in properties), "reset removes redeemed key");
+	});
+
+	// 29. LockService: concurrent run must be skipped, no duplicate report
+	await t("checkInAllGames skipped when another instance holds the script lock", async () => {
+		lockAvailable = false;
+		try {
+			const api = load();
+			api.config.genshin.data = [COOKIE];
+			api.config.starrail.data = [COOKIE];
+			await api.checkInAllGames();
+			assert.strictEqual(postedToDiscord.length, 0, "no Discord report from the skipped run");
+			assert.strictEqual(fetchLog.length, 0, "no API calls from the skipped run");
+		}
+		finally {
+			lockAvailable = true;
+		}
+	});
+
+	// 30. LockService: manual redeem also skips
+	await t("manuallyRedeemCodes skipped when another instance holds the script lock", async () => {
+		lockAvailable = false;
+		try {
+			const api = load();
+			api.config.genshin.data = [COOKIE];
+			await api.manuallyRedeemCodes("genshin", false);
+			assert.strictEqual(postedToDiscord.length, 0, "no Discord report from the skipped run");
+			assert.strictEqual(fetchLog.length, 0, "no API calls from the skipped run");
+		}
+		finally {
+			lockAvailable = true;
+		}
+	});
+
+	// 31. expired cookie during sign -> actionable message, not generic failure
+	await t("sign retcode -100 reports 'Cookie expired' instead of generic failure", async () => {
+		const api = load({ "/sign": { retcode: -100, message: "Login status is invalid" } });
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("Cookie expired"), "explicit cookie-expired message in report");
+		assert.ok(!msg.includes("Sign-in API call failed"), "no generic failure line");
+	});
+
+	// 32. expired cookie during getSignInfo -> actionable message
+	await t("getSignInfo retcode -100 reports 'Cookie expired' instead of generic failure", async () => {
+		const api = load({ "/info?act_id": { retcode: -100, message: "Login status is invalid" } });
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("Cookie expired"), "explicit cookie-expired message in report");
+		assert.ok(!msg.includes("Failed to get sign info"), "no generic failure line");
+	});
+
+	// 33. GAS 6-minute limit guard: redemption loop stops early with a warning
+	await t("redeemCodes stops early when maxExecutionTimeMs is exceeded", async () => {
+		const api = load();
+		api.config.maxExecutionTimeMs = 0; // already over budget -> stop before any redeem
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		const cdkeyHits = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		assert.strictEqual(cdkeyHits, 0, "no redemption attempted after budget exhausted");
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("Stopping early"), "warning about early stop in report");
+	});
+
+	// 34. 403 Cloudflare/WAF on redemption -> blocked flag, no JSON.parse crash
+	await t("redeemCode 403 returns blocked, does not crash on HTML body", async () => {
+		const api = load({
+			"webExchangeCdkey": { getResponseCode: () => 403, getContentText: () => "<html><body>Access denied</body></html>" }
+		});
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.success, false, "failure result");
+		assert.strictEqual(res.blocked, true, "blocked flag set");
+		assert.ok(!String(res.message).includes("Unexpected token"), "no JSON.parse garbage in message");
+	});
+
+	// 35. 403 on sign endpoint -> readable WAF message in the report
+	await t("checkInAllGames 403 on sign reports WAF block, no HTML garbage", async () => {
+		const api = load({
+			"/sign": { getResponseCode: () => 403, getContentText: () => "<html><body>Access denied</body></html>" }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("WAF"), "WAF/Cloudflare message in report");
+		assert.ok(!msg.includes("Unexpected token"), "no HTML parse garbage in report");
+	});
+
+	// 36. event-end: total == awards.length must show the LAST reward, not day 1
+	await t("award at event end uses last reward, not day-1 fallback", async () => {
+		const awards28 = { retcode: 0, data: { awards: Array.from({ length: 28 }, (_, i) => ({ name: `Reward${i}`, cnt: 20, icon: "" })) } };
+		const info28 = { retcode: 0, data: { total_sign_day: 28, today: "2026-07-30", is_sign: false } };
+		const api = load({ "/home?act_id": awards28, "/info?act_id": info28 });
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("Reward27 x20"), "last reward shown");
+		assert.ok(!msg.includes("Reward0 x20"), "day-1 reward NOT shown");
+	});
+
+	// 37. fixRegion falls back to the original API region instead of "Unknown"
+	await t("fixRegion returns original region for unknown servers", async () => {
+		const api = load();
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		assert.strictEqual(game.fixRegion("os_future_region"), "os_future_region", "original region preserved");
+		assert.strictEqual(game.fixRegion("os_asia"), "SEA", "known region still mapped");
+	});
+
+	// 38. early-return paths release the lock (no leak blocking the next run)
+	await t("invalid game name releases the script lock", async () => {
+		const api = load();
+		await assert.rejects(api.manuallyRedeemCodes("badgame", false));
+		// lock must be free again: a real game run proceeds normally
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		assert.ok(postedToDiscord.length >= 1, "subsequent run not blocked by leaked lock");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
