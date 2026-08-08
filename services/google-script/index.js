@@ -117,7 +117,11 @@ function getCookies (game) {
 }
 
 function getWebhook () {
-	return PropertiesService.getScriptProperties().getProperty("WEBHOOK_URL") || DISCORD_WEBHOOK;
+	const stored = PropertiesService.getScriptProperties().getProperty("WEBHOOK_URL");
+	const value = stored || DISCORD_WEBHOOK;
+	// Trim whitespace: a pasted webhook with a trailing space breaks
+	// UrlFetchApp with a DNS error, so never send the raw value.
+	return value ? value.trim() : null;
 }
 
 function getDiscordUserId () {
@@ -173,6 +177,23 @@ function guardResponse (response) {
 	return { status: code };
 }
 
+// Stable per-account device fingerprint. HoYoLAB's risk engine watches the
+// x-rpc-device_id header; sending the SAME id for every request from one
+// account makes the traffic look like one real client instead of an
+// anonymous script, which reduces Geetest/CAPTCHA friction. The id is a
+// random UUID minted once per ltuid and persisted in Script Properties.
+function getOrCreateDeviceId (ltuid) {
+	if (!ltuid) return null;
+	const props = PropertiesService.getScriptProperties();
+	const key = `DEVICE_ID_${ltuid}`;
+	let id = props.getProperty(key);
+	if (!id) {
+		id = Utilities.getUuid();
+		props.setProperty(key, id);
+	}
+	return id;
+}
+
 function browserHeaders (cookie, extra = {}, opts = {}) {
 	const base = {
 		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -187,6 +208,10 @@ function browserHeaders (cookie, extra = {}, opts = {}) {
 		Cookie: cookie,
 		...extra
 	};
+	// Same device id for every request from the same account (see above).
+	const ltuid = extractLtuid(cookie);
+	const deviceId = getOrCreateDeviceId(ltuid);
+	if (deviceId) base["x-rpc-device_id"] = deviceId;
 	if (opts.withReferer) {
 		base.Referer = "https://act.hoyolab.com/";
 		base.Origin = "https://act.hoyolab.com";
@@ -230,7 +255,7 @@ const CODE_SOURCES = {
 		// txt format: one code per line, blank lines ignored, no header.
 		parse: text => text.split(/\r?\n/)
 			.map(line => line.trim())
-			.filter(line => /^[A-Z0-9]{4,}$/.test(line))
+			.filter(line => /^[a-zA-Z0-9]{4,}$/i.test(line))
 			.map(code => ({ code }))
 	}
 };
@@ -265,6 +290,7 @@ async function fetchCodes (gameParam) {
 		if (r.status === "fulfilled") {
 			sourceHits[key] = r.value.length;
 			for (const entry of r.value) {
+				if (!entry || !entry.code) continue; // malformed source row — never map undefined
 				const existing = byCode.get(entry.code);
 				if (!existing) {
 					byCode.set(entry.code, entry);
@@ -469,7 +495,10 @@ function splitMessage (text, maxLen) {
 		}
 		let cut = remaining.lastIndexOf("\n", maxLen);
 		if (cut === -1 || cut < maxLen / 2) {
-			cut = maxLen;
+			cut = remaining.lastIndexOf(" ", maxLen); // prefer a space, then hard cut
+			if (cut === -1 || cut < maxLen / 2) {
+				cut = maxLen;
+			}
 		}
 		chunks.push(remaining.substring(0, cut));
 		remaining = remaining.substring(cut).trimStart();
@@ -506,13 +535,32 @@ function flushDiscordNotifications () {
 			content = `<@${discordUserId}> ${content}`;
 		}
 		try {
-			const discordRes = UrlFetchApp.fetch(webhook, {
+			const postOptions = {
 				method: "POST",
 				contentType: "application/json",
 				payload: JSON.stringify({ content }),
 				muteHttpExceptions: true
-			});
-			const code = discordRes.getResponseCode();
+			};
+			let discordRes = UrlFetchApp.fetch(webhook, postOptions);
+			let code = discordRes.getResponseCode();
+
+			// Discord rate-limited us. It always answers 429 with retry_after
+			// (seconds); sleep that long and retry ONCE so a transient burst
+			// of webhook traffic doesn't silently drop the report.
+			if (code === 429) {
+				let retryAfter = 0;
+				try {
+					const parsed = JSON.parse(discordRes.getContentText());
+					retryAfter = Number(parsed.retry_after) || 0;
+				}
+				catch (e) { /* non-JSON body — fall through with no retry delay */ }
+				if (retryAfter > 0) {
+					Utilities.sleep(Math.min(retryAfter * 1000, 15000)); // cap at 15s
+				}
+				discordRes = UrlFetchApp.fetch(webhook, postOptions);
+				code = discordRes.getResponseCode();
+			}
+
 			if (code < 200 || code >= 300) {
 				// Discord did not accept the message (webhook deleted/invalid =
 				// 404, rate-limited = 429, ...). muteHttpExceptions:true means
@@ -583,8 +631,8 @@ const DEFAULT_CONSTANTS = {
 // throwing a confusing TypeError when the cookie is stale or mis-pasted —
 // this is the single most common setup failure for this script.
 function extractLtuid (cookie) {
-	const m = String(cookie).match(/ltuid(?:_v2)?=([^;]+)/);
-	return m ? m[1] : null;
+	const m = String(cookie).match(/ltuid(?:_v2)?\s*=\s*([^;]+)/i);
+	return m ? m[1].trim() : null;
 }
 
 // Record-card responses are keyed by ltuid and identical for every game the
@@ -1061,8 +1109,10 @@ class Game {
 
 			// Rate-limit pause between redemption calls — but never after the
 			// final code, where it would just add wasted seconds to the run.
+			// Clamped to a safe floor: a user-set redeemSleepMs below 2000ms
+			// is a rate-limit ban waiting to happen.
 			if (i < codes.length - 1) {
-				Utilities.sleep(config.redeemSleepMs);
+				Utilities.sleep(Math.max(config.redeemSleepMs, 2000));
 			}
 
 			if (result && result.success) {
@@ -1158,7 +1208,7 @@ class Game {
 			}
 
 			if (i < codes.length - 1) {
-				Utilities.sleep(config.redeemSleepMs);
+				Utilities.sleep(Math.max(config.redeemSleepMs, 2000));
 			}
 
 			if (result && result.success) {
@@ -1519,7 +1569,11 @@ function truncateMsg (msg, max = 80) {
 }
 
 function checkInGame (gameName) {
-	const game = new Game(gameName, { data: getCookies(gameName) });
+	// Read cookies once: PropertiesService is a paid store — every extra read
+	// is a wasted round-trip, and both the Game constructor and the
+	// "no new check-ins" branch need the same array.
+	const cookies = getCookies(gameName);
+	const game = new Game(gameName, { data: cookies });
 	// Per-game notification buffer: games run concurrently via Promise.all in
 	// checkInAllGames, and writing into one shared array would interleave lines
 	// and let a failure-triggered flush steal another game's pending messages.
@@ -1542,7 +1596,7 @@ function checkInGame (gameName) {
 			// documented upstream behaviour). Tell the user so the Discord
 			// message doesn't look like we forgot about codes.
 			if (successes.length === 0) {
-				const hasAccounts = getCookies(gameName).length > 0;
+				const hasAccounts = cookies.length > 0;
 				if (hasAccounts) {
 					logNotification("info", gameName, "No new check-ins; promo codes not re-checked (run manuallyRedeemCodes() to force)", buffer);
 				}
@@ -1643,8 +1697,9 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 		return Promise.resolve({ success: false, message: "Code redemption is disabled in config" });
 	}
 
-	const game = new Game(gameName, { data: getCookies(gameName) });
-	const accounts = getCookies(gameName);
+	const cookies = getCookies(gameName);
+	const game = new Game(gameName, { data: cookies });
+	const accounts = cookies;
 
 	if (accounts.length === 0) {
 		logNotification("warn", gameName, "No accounts provided. Cannot redeem codes.");

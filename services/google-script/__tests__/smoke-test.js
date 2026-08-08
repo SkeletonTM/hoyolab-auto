@@ -41,12 +41,19 @@ let responseMap = {};
 let properties = {};
 let postedToDiscord = [];
 let lockAvailable = true; // LockService stub: false simulates another instance running
+let sleepCalls = []; // Utilities.sleep(ms) invocations (429 retry, redeem pacing)
+let headerLog = []; // opts.headers from every UrlFetchApp call (device_id assertions)
+let uuidCounter = 0;
+let discordResponder = null; // optional per-test Discord responder; null = default 204
 
 function makeSandbox () {
 	return {
 		console,
 		JSON, Math, Date, Array, Object, String, Number, Map, Promise, Error, RegExp,
-		Utilities: { sleep: () => {} },
+		Utilities: {
+			sleep: ms => { sleepCalls.push(ms); },
+			getUuid: () => `uuid-${++uuidCounter}`
+		},
 		LockService: {
 			getScriptLock: () => ({
 				tryLock: () => lockAvailable,
@@ -64,6 +71,7 @@ function makeSandbox () {
 		UrlFetchApp: {
 			fetch: (url, opts = {}) => {
 				fetchLog.push(url);
+				if (opts && opts.headers) headerLog.push(opts.headers);
 				if (url.includes("/sign") && opts && opts.method === "POST") signBodies.push(opts.payload || "");
 				for (const [pattern, responder] of Object.entries(responseMap)) {
 					if (url.includes(pattern)) {
@@ -79,7 +87,11 @@ function makeSandbox () {
 						};
 					}
 				}
-				if (url.includes("discord.com")) { postedToDiscord.push(JSON.parse(opts.payload || "{}").content); return { getResponseCode: () => 204, getContentText: () => "" }; }
+				if (url.includes("discord.com")) {
+					postedToDiscord.push(JSON.parse(opts.payload || "{}").content);
+					if (typeof discordResponder === "function") return discordResponder(url, opts);
+					return { getResponseCode: () => 204, getContentText: () => "" };
+				}
 				throw new Error("UNSTUBBED URL: " + url);
 			}
 		}
@@ -87,7 +99,8 @@ function makeSandbox () {
 }
 
 function load (overrides = {}) {
-	fetchLog = []; signBodies = []; postedToDiscord = [];
+	fetchLog = []; signBodies = []; postedToDiscord = []; sleepCalls = []; headerLog = [];
+	uuidCounter = 0; discordResponder = null;
 	properties = {}; // fresh script-properties per scenario — tests must not leak state
 	// Object-spread would let defaults overwrite same-key overrides; instead
 	// build an ordered entries array where overrides always match first.
@@ -115,7 +128,7 @@ function load (overrides = {}) {
 		// activate the config for tests
 		.replace("enableCodeRedemption: false", "enableCodeRedemption: true")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/test"');
-	vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, config, NOTIFICATIONS, extractLtuid, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game };", sandbox);
+	vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders };", sandbox);
 	return sandbox.__api;
 }
 
@@ -776,6 +789,106 @@ function load (overrides = {}) {
 		api.config.genshin.data = [COOKIE];
 		await api.manuallyRedeemCodes("genshin", false);
 		assert.ok(postedToDiscord.length >= 1, "subsequent run not blocked by leaked lock");
+	});
+
+	// 39. splitMessage: smart split — prefer newline, then space, before hard cut
+	await t("splitMessage cuts on last space when no newline near the limit", () => {
+		const api = load();
+		// Words of varying lengths; limit 30 lands mid-word on a hard cut
+		// ("elderberry") but a space exists at 24 — the smart split must prefer it.
+		const long = "apple banana cherry date elderberry fig grape honeydew kiwi lemon mango";
+		const chunks = api.splitMessage(long, 30);
+		assert.ok(chunks.length >= 2, "message split");
+		assert.strictEqual(long[chunks[0].length], " ", `first chunk ends on a space boundary, not mid-word (got: ${JSON.stringify(chunks[0])})`);
+		assert.ok(chunks.every(c => c.length <= 31), "no chunk exceeds the limit by more than a trailing space");
+	});
+	await t("splitMessage hard-cuts only when no space exists before the limit", () => {
+		const api = load();
+		const noSpace = "A".repeat(100);
+		const chunks = api.splitMessage(noSpace, 30);
+		assert.ok(chunks[0].length <= 30, "hard cut allowed when there is no space");
+	});
+
+	// 40. fetchCodes: entries without a code field must be skipped, no undefined key
+	await t("fetchCodes skips entries missing the code field", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [{ rewards: ["Primogem ×60"] }, { code: "GOODCODE", rewards: ["x"] }] },
+			"raw.githubusercontent.com": "GOODCODE\n"
+		});
+		const res = await api.fetchCodes("genshin");
+		assert.ok(res.codes.length === 1 && res.codes[0].code === "GOODCODE", "only code-bearing entries kept");
+		assert.ok(!res.codes.some(c => c.code === undefined), "no undefined-code entries");
+	});
+
+	// 41. humBao parser: lowercase codes accepted
+	await t("humBao parses lowercase codes", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [] },
+			"raw.githubusercontent.com": "lowercode1\nuppercase1\n\n"
+		});
+		const res = await api.fetchCodes("genshin");
+		const codes = res.codes.map(c => c.code);
+		assert.ok(codes.includes("lowercode1"), "lowercase code kept");
+		assert.ok(codes.includes("uppercase1"), "uppercase code kept");
+	});
+
+	// 42. getWebhook trims whitespace around the stored URL
+	await t("getWebhook trims trailing/leading whitespace", () => {
+		const api = load();
+		properties["WEBHOOK_URL"] = "  https://discord.com/api/webhooks/trimmed  ";
+		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/trimmed", "whitespace removed");
+	});
+
+	// 43. extractLtuid tolerates spaces around '='
+	await t("extractLtuid tolerates spaces around the equals sign", () => {
+		const api = load();
+		assert.strictEqual(api.extractLtuid("ltuid_v2 = 12345678; x=1"), "12345678", "spaced ltuid_v2");
+		assert.strictEqual(api.extractLtuid("ltuid=999 ; x=1"), "999", "trailing space after value");
+	});
+
+	// 44. redeemSleepMs clamped to a safe minimum
+	await t("redeemSleepMs is clamped to at least 2000ms", async () => {
+		const api = load();
+		api.config.redeemSleepMs = 100;
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		assert.ok(sleepCalls.length > 0, "redeem loop slept");
+		assert.ok(sleepCalls.every(ms => ms >= 2000), `all sleeps >= 2000 (got ${sleepCalls.join(",")})`);
+	});
+
+	// 45. Discord 429 -> parse retry_after, sleep, retry once
+	await t("Discord 429: sleeps retry_after and retries once", async () => {
+		let attempts = 0;
+		const api = load(); // load() resets discordResponder — set it AFTER
+		discordResponder = () => {
+			attempts++;
+			if (attempts === 1) return { getResponseCode: () => 429, getContentText: () => JSON.stringify({ retry_after: 0.25 }) };
+			return { getResponseCode: () => 204, getContentText: () => "" };
+		};
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		assert.strictEqual(attempts, 2, "exactly one retry after the 429");
+		assert.ok(sleepCalls.includes(250), "slept retry_after*1000 (250ms)");
+		assert.ok(postedToDiscord.length >= 1, "report eventually delivered");
+	});
+
+	// 46. x-rpc-device_id: stable per ltuid, persisted in Properties, sent on requests
+	await t("browserHeaders sends stable x-rpc-device_id per account", () => {
+		const api = load();
+		const h1 = api.browserHeaders(COOKIE, {}, { withReferer: true });
+		const h2 = api.browserHeaders(COOKIE, {}, { withReferer: true });
+		assert.ok(h1["x-rpc-device_id"], "device_id header present");
+		assert.strictEqual(h1["x-rpc-device_id"], h2["x-rpc-device_id"], "same device_id for the same cookie");
+		assert.ok(properties["DEVICE_ID_12345678"], "device_id persisted in Properties");
+	});
+	await t("checkInAllGames sends same device_id across requests for one account", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		api.config.starrail.data = [COOKIE];
+		await api.checkInAllGames();
+		const ids = headerLog.filter(h => h["x-rpc-device_id"]).map(h => h["x-rpc-device_id"]);
+		assert.ok(ids.length > 0, "requests carried device_id");
+		assert.strictEqual(new Set(ids).size, 1, "all requests used the same device_id");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
