@@ -10,6 +10,11 @@ const config = {
 	// burst of rapid redemption calls is what triggers it). Don't lower it below
 	// ~2000-3000ms unless you're OK risking a temporary rate-limit block.
 	redeemSleepMs: 6000,
+	// Hard cap on total runtime (ms) so the run finishes before Google kills
+	// the script at the GAS 6-minute execution limit for free accounts.
+	// When exceeded, the redemption loops stop early and the Discord report
+	// still gets flushed. Set to 0 to stop immediately (useful in tests).
+	maxExecutionTimeMs: 300000,
 	genshin: {
 		data: [
 			// "account_cookie_1",
@@ -45,10 +50,11 @@ const config = {
 function resetAllRedeemedCodes () {
 	const props = PropertiesService.getScriptProperties();
 	const prefix = new Set(["genshin_", "honkai_", "starrail_", "zenless_"]);
+	const prefixes = [...prefix]; // hoisted: don't rebuild the array per key
 	let cleared = 0;
 	const all = props.getProperties();
 	for (const key of Object.keys(all)) {
-		if ([...prefix].some(p => key.startsWith(p)) && (key.includes("redeemed_codes") || key.includes("blocked_codes"))) {
+		if (prefixes.some(p => key.startsWith(p)) && (key.includes("redeemed_codes") || key.includes("blocked_codes"))) {
 			props.deleteProperty(key);
 			cleared++;
 		}
@@ -151,10 +157,16 @@ function storeSecretsFromConfig () {
 // Guards an HTTP response before JSON.parse. HoYoLAB returns 429/5xx with a
 // non-JSON body (or an HTML error page) when the service is down or rate
 // limited; parsing that as JSON yields a misleading "Cannot parse JSON".
-// Returns { status: 200 } when fine, or { status: <code>, transient: true }
-// for 429 and 5xx so callers can report "server unavailable, retry later".
+// Returns { status: 200 } when fine, { status: <code>, transient: true } for
+// 429 and 5xx so callers can report "server unavailable, retry later", and
+// { status: <code>, blocked: true } for 403 — HoYoLAB's Cloudflare/WAF often
+// answers 403 with an HTML body, which would otherwise crash JSON.parse with
+// "Unexpected token <".
 function guardResponse (response) {
 	const code = response.getResponseCode();
+	if (code === 403) {
+		return { status: code, blocked: true };
+	}
 	if (code === 429 || code >= 500) {
 		return { status: code, transient: true };
 	}
@@ -274,6 +286,10 @@ async function fetchCodes (gameParam) {
 // by one game's failure can't steal another game's pending lines; buffers are
 // merged into NOTIFICATIONS right before flushDiscordNotifications().
 const NOTIFICATIONS = [];
+
+// Captured at module load; the redemption loops compare against this to stop
+// early when the GAS 6-minute execution limit is near (see config.maxExecutionTimeMs).
+const SCRIPT_START_TIME = Date.now();
 
 // Retcodes from the cdkey redemption API, mapped from the upstream
 // hoyolab-auto error-messages table (torikushiii/hoyolab-auto) plus the
@@ -620,6 +636,9 @@ class Game {
 					if (info.transient) {
 						logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): HoYoLAB server unavailable (sign info) — retry later`, buffer);
 					}
+					else if (info.cookieExpired) {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Cookie expired — grab a fresh one (README step 2)`, buffer);
+					}
 					else {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get sign info`, buffer);
 					}
@@ -669,7 +688,10 @@ class Game {
 				const totalSigned = data.total;
 				// total_sign_day is normally the index of today's award, but guard
 				// against any month-length surprise instead of crashing on undefined.
-				const awardEntry = awards[totalSigned] || awards[totalSigned % awards.length] || null;
+				// At event end (total == awards.length) `total % length` would wrap
+				// to day 1 — clamp to the LAST reward instead.
+				const awardIndex = Math.min(totalSigned, awards.length - 1);
+				const awardEntry = awards[awardIndex] || null;
 				const awardObject = awardEntry
 					? {
 						name: awardEntry.name,
@@ -685,6 +707,12 @@ class Game {
 					}
 					else if (sign.riskBlocked) {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in blocked by HoYoLAB risk/CAPTCHA check — open the game once and solve it, then retry`, buffer);
+					}
+					else if (sign.blocked) {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in blocked by HoYoLAB WAF/Cloudflare — retry later`, buffer);
+					}
+					else if (sign.cookieExpired) {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Cookie expired — grab a fresh one (README step 2)`, buffer);
 					}
 					else {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Sign-in API call failed`, buffer);
@@ -804,6 +832,10 @@ class Game {
 				console.error(`${this.fullName}:sign`, `HTTP ${g.status} — server unavailable, retry later`);
 				return { success: false, transient: true };
 			}
+			if (g.blocked) {
+				console.error(`${this.fullName}:sign`, "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403).");
+				return { success: false, blocked: true, message: "blocked by HoYoLAB WAF/Cloudflare" };
+			}
 			const data = JSON.parse(response.getContentText());
 
 			// Detect a geetest/risk-gate response first — HoYoLAB returns a
@@ -814,6 +846,13 @@ class Game {
 			if (data?.data?.gt_result?.is_risk) {
 				console.error(`${this.fullName}:sign`, "Blocked by risk/CAPTCHA check.", data);
 				return { success: false, riskBlocked: true };
+			}
+			// Detect an expired/invalid cookie before the generic retcode check —
+			// stale cookies are the #1 cause of check-in failures, so report them
+			// with an actionable message instead of "Sign-in API call failed".
+			if (data && REDEEM_RETCODE_COOKIE_INVALID.includes(data.retcode)) {
+				console.error(`${this.fullName}:sign`, "Cookie invalid/expired — grab a fresh one.", data);
+				return { success: false, cookieExpired: true, message: "cookie expired — grab a fresh one (README step 2)" };
 			}
 			if (response.getResponseCode() !== 200 || data.retcode !== 0) {
 				console.error(`${this.fullName}:sign`, "Failed to sign in.", data);
@@ -854,9 +893,18 @@ class Game {
 				console.error(`${this.fullName}:getSignInfo`, `HTTP ${g.status} — server unavailable, retry later`);
 				return { success: false, transient: true };
 			}
+			if (g.blocked) {
+				console.error(`${this.fullName}:getSignInfo`, "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403).");
+				return { success: false, blocked: true, message: "blocked by HoYoLAB WAF/Cloudflare" };
+			}
 			const data = JSON.parse(response.getContentText());
 
 			if (g.status !== 200 || data.retcode !== 0) {
+				// Expired cookie → actionable message (the #1 check-in failure).
+				if (data && REDEEM_RETCODE_COOKIE_INVALID.includes(data.retcode)) {
+					console.error(`${this.fullName}:getSignInfo`, "Cookie invalid/expired — grab a fresh one.", data);
+					return { success: false, cookieExpired: true, message: "cookie expired — grab a fresh one (README step 2)" };
+				}
 				console.error(
 					`${this.fullName}:getSignInfo`,
 					"Failed to get sign info.",
@@ -946,7 +994,9 @@ class Game {
 			case "prod_official_usa":
 				return "NA";
 			default:
-				return "Unknown";
+				// Unknown/new server region: keep the original API value so the
+				// caller can at least log/report it instead of a useless "Unknown".
+				return region;
 		}
 	}
 
@@ -980,6 +1030,13 @@ class Game {
 				continue;
 			}
 
+			// GAS hard-kills scripts past the 6-minute limit (free accounts);
+			// stop redeeming early so the Discord report still gets flushed.
+			if (typeof config.maxExecutionTimeMs === "number" && Date.now() - SCRIPT_START_TIME >= config.maxExecutionTimeMs) {
+				logNotification("warn", this.fullName, `Stopping early to avoid GAS 6-minute execution limit`, buffer);
+				break;
+			}
+
 			const result = await this.redeemCode(account, code.code);
 
 			// If the server is down, the cookie is dead or we hit a CAPTCHA gate,
@@ -988,6 +1045,11 @@ class Game {
 			if (result && result.transient) {
 				logNotification("warn", this.fullName,
 					`${account.nickname} (${account.uid}): HoYoLAB server unavailable (HTTP ${result.status}) — skipping remaining codes, retry later`, buffer);
+				break;
+			}
+			if (result && result.blocked) {
+				logNotification("error", this.fullName,
+					`${account.nickname} (${account.uid}): Blocked by HoYoLAB WAF/Cloudflare (HTTP 403) — skipping remaining codes`, buffer);
 				break;
 			}
 			if (result && (result.cookieExpired || result.captcha)) {
@@ -1070,12 +1132,22 @@ class Game {
 				blocked.push(code.code);
 				continue;
 			}
+			// Same GAS time-budget guard as redeemCodes.
+			if (typeof config.maxExecutionTimeMs === "number" && Date.now() - SCRIPT_START_TIME >= config.maxExecutionTimeMs) {
+				logNotification("warn", this.fullName, `Stopping early to avoid GAS 6-minute execution limit`, buffer);
+				break;
+			}
 			const result = await this.redeemCode(account, code.code);
 
 			// Stop early on server-down / dead cookie / CAPTCHA, same as redeemCodes.
 			if (result && result.transient) {
 				logNotification("warn", this.fullName,
 					`${account.nickname} (${account.uid}): HoYoLAB server unavailable (HTTP ${result.status}) — skipping remaining codes, retry later`, buffer);
+				break;
+			}
+			if (result && result.blocked) {
+				logNotification("error", this.fullName,
+					`${account.nickname} (${account.uid}): Blocked by HoYoLAB WAF/Cloudflare (HTTP 403) — skipping remaining codes`, buffer);
 				break;
 			}
 			if (result && (result.cookieExpired || result.captcha)) {
@@ -1175,6 +1247,10 @@ class Game {
 			if (g.transient) {
 				console.error(`Code ${code} redemption skipped for ${this.fullName}: HTTP ${g.status} — server unavailable, retry later`);
 				return { success: false, transient: true, status: g.status, message: `HTTP ${g.status} — server unavailable, retry later` };
+			}
+			if (g.blocked) {
+				console.error(`Code ${code} redemption skipped for ${this.fullName}: blocked by HoYoLAB WAF/Cloudflare (HTTP 403)`);
+				return { success: false, blocked: true, status: g.status, message: "blocked by HoYoLAB WAF/Cloudflare" };
 			}
 			const data = JSON.parse(response.getContentText());
 
@@ -1490,6 +1566,16 @@ function checkInGame (gameName) {
 }
 
 function checkInAllGames () {
+	// Concurrency guard: a time-driven trigger can fire while a manual run is
+	// in progress (or two triggers can overlap). Without a lock, both would
+	// redeem codes twice, race on PropertiesService and send duplicate Discord
+	// reports. LockService is the GAS-native idempotency mechanism.
+	const lock = LockService.getScriptLock();
+	if (!lock.tryLock(10000)) {
+		console.log("Skipping run: another instance is already executing.");
+		return Promise.resolve([]);
+	}
+
 	const games = ["genshin", "honkai", "starrail", "zenless"];
 
 	NOTIFICATIONS.length = 0;
@@ -1518,10 +1604,19 @@ function checkInAllGames () {
 			console.log("All games checked in successfully");
 			flushDiscordNotifications();
 			return results.flatMap(r => r.value ? r.value.successes : []);
-		});
+		})
+		.finally(() => lock.releaseLock());
 }
 
 function manuallyRedeemCodes (gameName, forceRedeem = false) {
+	// Same concurrency guard as checkInAllGames: a manual redeem triggered
+	// while the daily run is still working would double-redeem and double-post.
+	const lock = LockService.getScriptLock();
+	if (!lock.tryLock(10000)) {
+		console.log("Skipping run: another instance is already executing.");
+		return Promise.resolve({ success: false, message: "Another instance is already executing" });
+	}
+
 	NOTIFICATIONS.length = 0;
 
 	if (![
@@ -1529,12 +1624,14 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 	].includes(gameName)) {
 		logNotification("error", gameName, `Invalid game name. Must be one of: genshin, honkai, starrail, zenless`);
 		flushDiscordNotifications();
+		lock.releaseLock();
 		return Promise.reject(new Error(`Invalid game name: ${gameName}`));
 	}
 
 	if (gameName === "honkai") {
 		logNotification("warn", gameName, "Code redemption is not supported for Honkai Impact 3rd");
 		flushDiscordNotifications();
+		lock.releaseLock();
 		return Promise.resolve({ success: false, message: "Code redemption is not supported for Honkai Impact 3rd" });
 	}
 
@@ -1542,6 +1639,7 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 	if (!config.enableCodeRedemption && !forceRedeem) {
 		logNotification("warn", gameName, "Code redemption is disabled in config (use forceRedeem=true to bypass)");
 		flushDiscordNotifications();
+		lock.releaseLock();
 		return Promise.resolve({ success: false, message: "Code redemption is disabled in config" });
 	}
 
@@ -1551,6 +1649,7 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 	if (accounts.length === 0) {
 		logNotification("warn", gameName, "No accounts provided. Cannot redeem codes.");
 		flushDiscordNotifications();
+		lock.releaseLock();
 		return Promise.resolve({ success: false, message: `No ${gameName} accounts provided` });
 	}
 
@@ -1593,6 +1692,7 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 		}
 	})).finally(() => {
 		flushDiscordNotifications();
+		lock.releaseLock();
 	});
 }
 
