@@ -151,6 +151,44 @@ function load (overrides = {}) {
 		assert.strictEqual(rcCalls, 1, `record-card calls ${rcCalls} == 1 (one per ltuid, shared across games)`);
 	});
 
+	// 3b. PropertiesService has a 9KB per-value limit. saveRedeemedCodes appends
+	// codes forever; cap the stored array to the last 200 so it can never blow
+	// past the limit (old codes are expired anyway).
+	await t("saveRedeemedCodes caps stored codes to the last 200", async () => {
+		const api = load();
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const codes = Array.from({ length: 250 }, (_, i) => `CODE${String(i).padStart(3, "0")}`);
+		game.saveRedeemedCodes(codes, "800000001");
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
+		assert.strictEqual(stored.length, 200, "capped to 200");
+		assert.strictEqual(stored[0], "CODE050", "oldest kept code is the 51st (index 50)");
+		assert.strictEqual(stored[199], "CODE249", "newest code preserved");
+	});
+
+	// 3c. getRedemptionUrl is called inside redeemCode's try/catch so an unknown
+	// region (mapToInternalRegion throws) fails that one code without killing
+	// the whole redemption loop.
+	await t("redeemCode with unknown region returns error, does not throw", async () => {
+		const api = load();
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const result = await game.redeemCode({ cookie: COOKIE, region: "Unknown" }, "TESTCODE1");
+		assert.strictEqual(result.success, false, "returns failure object, not throw");
+		assert.ok(result.message, "has a message");
+	});
+
+	// 3d. getAccountDetails must not throw TypeError when the API returns a
+	// success retcode with an empty/missing data payload (server maintenance) —
+	// it should fall through to the existing "no account found" error path.
+	await t("getAccountDetails with empty data payload gives readable error, no TypeError", async () => {
+		const api = load({ "getGameRecordCard": { retcode: 0, data: null } });
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		await assert.rejects(
+			() => game.getAccountDetails(COOKIE, "12345678"),
+			/No Genshin Impact account found/,
+			"readable error instead of TypeError"
+		);
+	});
+
 	// 4. broken cookie -> clear error line, no TypeError
 	await t("broken cookie produces readable error, run completes", async () => {
 		const api = load();
