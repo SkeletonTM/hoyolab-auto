@@ -519,12 +519,12 @@ function flushDiscordNotifications () {
 	const hasErrors = NOTIFICATIONS.some(line => line.includes("❌"));
 	const body = NOTIFICATIONS.join("\n");
 	const { intro, outro } = juFufuContextualLines(NOTIFICATIONS);
-	// ">>> " on every report line marks it as a block-quote, visually
+	// "> " on every report line marks it as a block-quote, visually
 	// separating Ju Fufu's commentary from the data she's reporting.
-	// Discord renders ">>> " as a quote until the NEXT BLANK LINE, so the
-	// outro needs a blank line before it — otherwise her sign-off gets
-	// swallowed into the quoted report block.
-	const quoted = body.split("\n").map(line => `>>> ${line}`).join("\n");
+	// A single ">" quote is closed by a blank line, so the outro after the
+	// blank line stays outside the quote. (">>> " would NOT be closed by a
+	// blank line — Discord renders it to the end of the message.)
+	const quoted = body.split("\n").map(line => `> ${line}`).join("\n");
 	const wrapped = `${intro}\n${quoted}\n\n${outro}`;
 	const chunks = splitMessage(wrapped, 1900); // Discord content limit is 2000
 
@@ -1065,6 +1065,18 @@ class Game {
 		const newBlocked = [];   // just rejected as permanent — reported once
 		const newlyRedeemed = []; // batched, persisted once below
 
+		// Unknown region: mapToInternalRegion throws per code, which would
+		// spam one "Unknown region …" error for every code in the batch.
+		// Check once up front and stop with a single report line instead.
+		try {
+			this.mapToInternalRegion(account.region);
+		}
+		catch (e) {
+			logNotification("error", this.fullName,
+				`${account.nickname} (${account.uid}): ${e.message} — no codes redeemed`, buffer);
+			return;
+		}
+
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
 			if (redeemedCodes.includes(code.code)) {
@@ -1150,8 +1162,13 @@ class Game {
 		}
 
 		// One properties write for the whole account instead of one per code.
-		if (newlyRedeemed.length > 0) {
-			this.saveRedeemedCodes(newlyRedeemed, account.uid);
+		// Expired/invalid codes (-2001/-2003) are final — they can never become
+		// valid again, so persist them alongside the redeemed ones. Otherwise
+		// every run retries them and the report shows the same ⚠️ forever.
+		// (Cooldown/busy are transient and stay unpersisted — retried later.)
+		const toPersist = [...newlyRedeemed, ...expired];
+		if (toPersist.length > 0) {
+			this.saveRedeemedCodes(toPersist, account.uid);
 		}
 		if (newBlocked.length > 0) {
 			this.saveBlockedCodes(newBlocked, account.uid);
@@ -1173,6 +1190,17 @@ class Game {
 		const blocked = [];
 		const newBlocked = [];
 		const newlyRedeemed = [];
+
+		// Unknown region: fail fast with one report line instead of one
+		// "Unknown region …" error per code (same guard as redeemCodes).
+		try {
+			this.mapToInternalRegion(account.region);
+		}
+		catch (e) {
+			logNotification("error", this.fullName,
+				`${account.nickname} (${account.uid}): ${e.message} — no codes redeemed`, buffer);
+			return;
+		}
 
 		for (let i = 0; i < codes.length; i++) {
 			const code = codes[i];
@@ -1240,8 +1268,12 @@ class Game {
 			}
 		}
 
-		if (newlyRedeemed.length > 0) {
-			this.saveRedeemedCodes(newlyRedeemed, account.uid);
+		// One properties write for the whole account instead of one per code.
+		// Expired/invalid codes (-2001/-2003) are final — persist them too so
+		// later runs don't retry the same dead codes every time.
+		const toPersist = [...newlyRedeemed, ...expired];
+		if (toPersist.length > 0) {
+			this.saveRedeemedCodes(toPersist, account.uid);
 		}
 		if (newBlocked.length > 0) {
 			this.saveBlockedCodes(newBlocked, account.uid);
