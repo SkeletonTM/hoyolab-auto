@@ -6,7 +6,7 @@ Automatically signs you into **Genshin Impact, Honkai Impact 3rd, Honkai: Star R
 
 Runs entirely on Google's free infrastructure: **no local machine, no Docker, no cost.**
 
-This is a trimmed-down fork of [torikushiii/hoyolab-auto](https://github.com/torikushiii/hoyolab-auto) with fixed Discord notifications so code redemption actually reports correctly.
+This is a trimmed-down fork of [torikushiii/hoyolab-auto](https://github.com/torikushiii/hoyolab-auto).
 
 ---
 
@@ -48,7 +48,7 @@ const config = {
 };
 ```
 
-Add **one string per account** inside the array. Multiple accounts = multiple strings.
+One string per account inside the array; multiple accounts = multiple strings.
 
 #### 📎 How to get a cookie
 
@@ -98,8 +98,6 @@ Once basic check-in works for a day or two, set `enableCodeRedemption: true`. No
 Already-redeemed codes are remembered in `PropertiesService`, so they won't be claimed twice.
 
 **Want codes checked even for already-signed-in accounts?** Set `redeemCodesEvenIfSignedIn: true` — useful if you run twice a day or a limited code drops after the morning check-in.
-
-> 📖 The full list of code outcomes and how the script reacts to each is in [Configuration reference → Code outcomes](#code-outcomes).
 
 **Force a one-off redemption** from the toolbar (e.g. the API missed a fresh code):
 
@@ -154,7 +152,7 @@ If you set a webhook, the Discord report arrives within seconds.
 |---|---|---|
 | `enableCodeRedemption` | `false` | Redeem active promo codes for accounts that just signed in |
 | `redeemCodesEvenIfSignedIn` | `false` | Also redeem codes for accounts already signed in today |
-| `redeemSleepMs` | `6000` | Pause (ms) between individual code redemptions — protects against HoYoLAB rate limits. The script enforces a hard floor of 2000 ms, so values below that are clamped up |
+| `redeemSleepMs` | `6000` | Pause (ms) between code redemptions — rate-limit guard; hard floor 2000 ms enforced |
 
 ### Code outcomes
 
@@ -177,8 +175,6 @@ Active promo codes are pulled from **two** community aggregators in parallel and
 - [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) — GitHub-hosted txt files, updated daily
 
 Running both in parallel means a single outage doesn't block redemption. If both fail, the run reports 0 codes and moves on. To add a third source, append an entry to `CODE_SOURCES` and to `CODE_SOURCE_ORDER` in `index.js`.
-
-> 📊 Measured on 2026-07-04: Genshin 4, Star Rail 11, Zenless 8 unique codes after dedup.
 
 ### Storing secrets in Script Properties
 
