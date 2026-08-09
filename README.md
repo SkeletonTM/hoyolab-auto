@@ -72,15 +72,20 @@ const DISCORD_USER_ID = "";    // optional: your Discord user ID (pings you on e
 - Follow [`setup/DISCORD_WEBHOOK.md`](setup/DISCORD_WEBHOOK.md) to create a webhook, then paste the URL into `DISCORD_WEBHOOK`.
 - Want an `@mention` on errors? Put your numeric Discord user ID into `DISCORD_USER_ID`.
 
-With a webhook set, **every** run posts a single Discord message — a short voice line from Ju Fufu 🐯, the check-in report grouped per account, and promo-code lines if redemption is on:
+With a webhook set, **every** run posts a single Discord message — a short voice line from Ju Fufu 🐯, the check-in report grouped per account (each line in a quote block), and promo-code lines if redemption is on:
 
 ```text
-✅ [Genshin Impact] Alice: Got Primogem x20 (total: 31)
-⏭️ [Honkai: Star Rail] Bob: Already signed in today (total: 14)
-🎁 [Genshin Impact] Alice: +2 new — GENSHIN2026, NEWCODE01
-⏭️ [Genshin Impact] Alice: rest — 3 already redeemed, 1 expired
-⚠️ [Genshin Impact] Alice: 2 in cooldown — retried next run
+Fu-fu~ A calm morning. All rewards collected, all tails in order~ 🐯
+> ✅ [Genshin Impact] Alice: Got Primogem x20 (total: 31)
+> ⏭️ [Honkai: Star Rail] Bob: Already signed in today (total: 14)
+> 🎁 [Genshin Impact] Alice: +2 new — GENSHIN2026, NEWCODE01
+> ⏭️ [Genshin Impact] Alice: rest — 3 already redeemed, 1 expired
+> ⚠️ [Genshin Impact] Alice: 2 in cooldown — retried next run
+
+Nothing new — and that's good too. Rest now, dear~ 🐯
 ```
+
+Report lines use a single `>` quote prefix so Ju Fufu's sign-off (after the blank line) stays outside the quote block.
 
 Promo codes are **grouped per account** (one line for new claims + one compact summary), not one line per code.
 
@@ -149,7 +154,7 @@ If you set a webhook, the Discord report arrives within seconds.
 |---|---|---|
 | `enableCodeRedemption` | `false` | Redeem active promo codes for accounts that just signed in |
 | `redeemCodesEvenIfSignedIn` | `false` | Also redeem codes for accounts already signed in today |
-| `redeemSleepMs` | `6000` | Pause (ms) between individual code redemptions — protects against HoYoLAB rate limits. Don't go below ~2000-3000 |
+| `redeemSleepMs` | `6000` | Pause (ms) between individual code redemptions — protects against HoYoLAB rate limits. The script enforces a hard floor of 2000 ms, so values below that are clamped up |
 
 ### Code outcomes
 
@@ -158,7 +163,7 @@ How the script classifies each redemption attempt (by API retcode):
 | Retcode / response | Meaning | Script reaction |
 |---|---|---|
 | `-2017` / `-2018` | Already redeemed on this account | Skip, remember, never retry |
-| `-2001` / `-2003` | Expired / invalid | Warning (⚠️) |
+| `-2001` / `-2003` | Expired / invalid | Warning (⚠️), remembered, never retried |
 | `-2016` (cooldown), `-1048` (API busy) | Transient | Not remembered, retried next run |
 | `-1071` / `-100` / `-10001` | Cookie expired | Stop the rest of this account's codes, clear message |
 | `1034` / `10035` / `10041`, or `gt_result.is_risk` | CAPTCHA / risk gate | Stop, asks you to solve manually |
@@ -234,6 +239,7 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | **`Error: undefined`** | The underlying error had no `.message`. The function name in the surrounding text tells you which API call failed; full error is in **Executions**. |
 | **"cookie expired — grab a fresh one"** | Cookie expired (`-1071`/`-100`/`-10001`). The script stops that account's codes and reports once. Re-grab the cookie. |
 | **Already signed in, but codes not claimed** | Default: codes only redeem for accounts that *just* signed in. Set `redeemCodesEvenIfSignedIn: true`, or force once with `redeemGenshinCodes(true)` etc. |
+| **"Unknown region" for a whole account** | Your account is on a server the script doesn't recognise yet. The account is skipped with a single error line; no codes are attempted. Report the region name in an issue so it can be mapped. |
 
 ---
 
@@ -245,7 +251,7 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | Discord notifications on code redemption | ❌ | ✅ |
 | Discord notifications on errors | ❌ | ✅ |
 | Webhook POSTs per run | up to 4 × accounts | exactly 1 |
-| Files in the repo | 100+ | 7 |
+| Files in the repo | 100+ | 9 |
 | Code source | `api.ennead.cc` only | `api.ennead.cc` + Hum-Bao, merged in parallel |
 
 ---
