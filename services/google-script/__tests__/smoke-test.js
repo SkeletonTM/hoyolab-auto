@@ -260,6 +260,37 @@ function load (overrides = {}) {
 		assert.ok(!msg.includes("❌"), "no error icons");
 	});
 
+	// 8b. expired codes (-2001/-2003) are final states — an expired code can
+	// never become valid again, so persist it to stop retrying it every run
+	// (and stop the ⚠️ spam in reports). Unlike cooldown/busy, which are
+	// transient and must NOT be persisted.
+	await t("retcode -2001 expired: code persisted as redeemed (never retried)", async () => {
+		const api = load({ "webExchangeCdkey": REDEEM_EXPIRED });
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
+		assert.ok(stored.includes("TESTCODE1") && stored.includes("TESTCODE2"), "expired codes persisted so later runs skip them");
+	});
+
+	// 8c. Unknown account region: mapToInternalRegion throws, and without a
+	// guard every code in the batch would fail with "Unknown region …" —
+	// one error per code. Fail fast: report the region problem once.
+	await t("unknown account region reported once, not per-code", async () => {
+		const UNKNOWN_REGION_CARD = {
+			retcode: 0,
+			data: { list: [{ game_id: 2, game_role_id: "800000001", nickname: "Alice", level: 58, region: "os_mars" }] }
+		};
+		const api = load({
+			"getGameRecordCard": UNKNOWN_REGION_CARD,
+			"webExchangeCdkey": REDEEM_OK
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		const msg = postedToDiscord[0];
+		const occurrences = (msg.match(/Unknown region/g) || []).length;
+		assert.strictEqual(occurrences, 1, "region reported once, not once per code");
+	});
+
 	// 9. force redeem persists codes (regression test for old bug)
 	await t("forceRedeemCodes saves claimed codes to PropertiesService", async () => {
 		const api = load();
@@ -374,10 +405,10 @@ function load (overrides = {}) {
 			j(["ℹ️ [G] Alice: no active promo codes right now"]));
 	});
 
-	// 16b. Discord blockquote layout: every report line gets a ">>> " prefix,
-	// but the outro (Ju Fufu's sign-off) must sit OUTSIDE the quote block —
-	// Discord renders ">>>" until the next blank line, so the sign-off needs a
-	// blank line before it or it gets swallowed into the quote.
+	// 16b. Discord blockquote layout: every report line gets a "> " prefix.
+	// A single ">" quote is closed by a blank line, so the outro (Ju Fufu's
+	// sign-off) stays OUTSIDE the quote block. (">>> " would eat everything
+	// to the end of the message, blank line or not.)
 	await t("outro is separated from the quoted report by a blank line", async () => {
 		const api = load({
 			"getGameRecordCard": RECORD_CARD,
@@ -393,15 +424,15 @@ function load (overrides = {}) {
 		await api.checkInAllGames();
 		const msg = postedToDiscord[0];
 		const lines = msg.split("\n");
-		const reportLines = lines.filter(l => l.startsWith(">>> "));
+		const reportLines = lines.filter(l => l.startsWith("> "));
 		assert.ok(reportLines.length > 0, "report lines are quoted");
-		// outro is the last non-empty line and is NOT prefixed with ">>> "
+		// outro is the last non-empty line and is NOT prefixed with "> "
 		const lastNonEmpty = [...lines].reverse().find(l => l.trim() !== "");
 		const outroIdx = lines.lastIndexOf(lastNonEmpty);
 		assert.ok(outroIdx > -1, "outro present");
-		const lastQuoteIdx = lines.map((l, i) => l.startsWith(">>> ") ? i : -1).filter(i => i > -1).pop();
+		const lastQuoteIdx = lines.map((l, i) => l.startsWith("> ") ? i : -1).filter(i => i > -1).pop();
 		assert.strictEqual(outroIdx, lastQuoteIdx + 2, "blank line between last quoted line and outro");
-		assert.ok(!lines[outroIdx].startsWith(">>>"), "outro itself is not quoted");
+		assert.ok(!lines[outroIdx].startsWith(">"), "outro itself is not quoted");
 	});
 
 	// 16c. Discord webhook errors must be visible in Executions — with
