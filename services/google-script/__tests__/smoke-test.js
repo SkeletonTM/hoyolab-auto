@@ -644,6 +644,12 @@ function load (overrides = {}) {
 		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/1234567890/abcdef", "valid Discord webhook accepted");
 		properties["WEBHOOK_URL"] = "https://canary.discord.com/api/webhooks/1/xyz";
 		assert.strictEqual(api.getWebhook(), "https://canary.discord.com/api/webhooks/1/xyz", "canary subdomain accepted");
+		// Thread webhooks carry ?thread_id=… — must not be rejected by validation.
+		properties["WEBHOOK_URL"] = "https://discord.com/api/webhooks/1234567890/abcdef?thread_id=123456";
+		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/1234567890/abcdef?thread_id=123456", "thread webhook with query accepted");
+		// …but a query string can't smuggle a different host in front of the path.
+		properties["WEBHOOK_URL"] = "https://discord.com/api/webhooks/1234567890/abcdef?x=1&redirect=https://evil.example";
+		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/1234567890/abcdef?x=1&redirect=https://evil.example", "query params keep the validated host");
 		delete properties["WEBHOOK_URL"];
 		// No stored property -> falls back to the inline DISCORD_WEBHOOK constant
 		// (the harness replaces it with a valid URL), so getWebhook must return
