@@ -119,6 +119,8 @@ Already-redeemed codes are remembered in `PropertiesService`, so they won't be c
    - **Time:** pick **05:00–06:00 server time** for your region — see [Daily reset schedule](#daily-reset-schedule).
 4. Save and accept the authorisation prompts.
 
+**One-click alternative:** run `createDailyTrigger()` from the editor — it removes any old triggers and installs the daily `checkInAllGames` run at 08:00 (pass a different hour to override, e.g. `createDailyTrigger(6)`).
+
 ### 6. Run it once manually
 
 Click ▶ **Run** with `checkInAllGames` selected. Accept the authorisation dialog. Open the **Executions** tab to see logs and errors.

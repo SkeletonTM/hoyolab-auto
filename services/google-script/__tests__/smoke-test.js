@@ -36,12 +36,15 @@ const REDEEM_ALREADY = { retcode: -2017, message: "Redemption code has been used
 const REDEEM_EXPIRED = { retcode: -2001, message: "Expired redemption code" };
 
 let fetchLog = [];
+let fetchOptsLog = []; // { url, mute } per UrlFetchApp call (muteHttpExceptions assertions)
 let signBodies = []; // POST bodies captured from /sign requests (regression: act_id payload)
 let responseMap = {};
 let properties = {};
+let propertyReads = {}; // per-key getProperty call counter (device-id caching assertion)
 let postedToDiscord = [];
 let lockAvailable = true; // LockService stub: false simulates another instance running
 let sleepCalls = []; // Utilities.sleep(ms) invocations (429 retry, redeem pacing)
+let triggerLog = []; // ScriptApp actions: {action, handler, hour?} (createDailyTrigger assertions)
 let headerLog = []; // opts.headers from every UrlFetchApp call (device_id assertions)
 let uuidCounter = 0;
 let discordResponder = null; // optional per-test Discord responder; null = default 204
@@ -54,6 +57,28 @@ function makeSandbox () {
 			sleep: ms => { sleepCalls.push(ms); },
 			getUuid: () => `uuid-${++uuidCounter}`
 		},
+		ScriptApp: {
+			newTrigger: (handler) => ({
+				timeBased: () => ({
+					everyDays: (n) => ({
+						atHour: (h) => ({
+							create: () => { triggerLog.push({ action: "create", handler, hour: h, everyDays: n }); }
+						})
+					})
+				})
+			}),
+			getProjectTriggers: () => triggerLog.filter(t => t.action === "create").map((t, i) => ({
+				getHandlerFunction: () => t.handler
+			})),
+			deleteTrigger: (t) => {
+				const handler = t.getHandlerFunction();
+				// Remove the matching create entry so getProjectTriggers reflects
+				// reality (a deleted trigger is gone, not still listed).
+				const idx = triggerLog.findIndex(x => x.action === "create" && x.handler === handler);
+				if (idx >= 0) triggerLog.splice(idx, 1);
+				triggerLog.push({ action: "delete", handler });
+			}
+		},
 		LockService: {
 			getScriptLock: () => ({
 				tryLock: () => lockAvailable,
@@ -62,7 +87,7 @@ function makeSandbox () {
 		},
 		PropertiesService: {
 			getScriptProperties: () => ({
-				getProperty: k => (k in properties ? properties[k] : null),
+				getProperty: k => { propertyReads[k] = (propertyReads[k] || 0) + 1; return (k in properties ? properties[k] : null); },
 				getProperties: () => Object.assign({}, properties),
 				setProperty: (k, v) => { properties[k] = v; },
 				deleteProperty: k => { delete properties[k]; }
@@ -71,6 +96,7 @@ function makeSandbox () {
 		UrlFetchApp: {
 			fetch: (url, opts = {}) => {
 				fetchLog.push(url);
+				fetchOptsLog.push({ url, mute: opts.muteHttpExceptions === true });
 				if (opts && opts.headers) headerLog.push(opts.headers);
 				if (url.includes("/sign") && opts && opts.method === "POST") signBodies.push(opts.payload || "");
 				for (const [pattern, responder] of Object.entries(responseMap)) {
@@ -99,9 +125,9 @@ function makeSandbox () {
 }
 
 function load (overrides = {}) {
-	fetchLog = []; signBodies = []; postedToDiscord = []; sleepCalls = []; headerLog = [];
+	fetchLog = []; fetchOptsLog = []; signBodies = []; postedToDiscord = []; sleepCalls = []; headerLog = [];
 	uuidCounter = 0; discordResponder = null;
-	properties = {}; // fresh script-properties per scenario — tests must not leak state
+	properties = {}; propertyReads = {}; triggerLog = []; // fresh script-properties per scenario — tests must not leak state
 	// Object-spread would let defaults overwrite same-key overrides; instead
 	// build an ordered entries array where overrides always match first.
 	const defaults = {
@@ -127,8 +153,8 @@ function load (overrides = {}) {
 	const src = fs.readFileSync(__dirname + "/../index.js", "utf8")
 		// activate the config for tests
 		.replace("enableCodeRedemption: false", "enableCodeRedemption: true")
-		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/test"');
-	vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders };", sandbox);
+		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
+		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders };", sandbox);
 	return sandbox.__api;
 }
 
@@ -324,7 +350,7 @@ function load (overrides = {}) {
 		// be flushed, and the run must reject (Failed in Executions).
 		postedToDiscord.length = 0; // this test builds its own sandbox; reset the shared stub
 		const src = `
-			config.genshin.data = ["ltuid_v2=1; x=1"];
+			config.genshin.data = ["ltuid_v2=1; ltoken_v2=abc; x=1"];
 			Game.prototype.redeemCodes = async function () { throw new Error("redeem boom"); };
 			checkInAllGames();
 		`;
@@ -334,7 +360,7 @@ function load (overrides = {}) {
 		vm2.createContext(sandbox);
 		let code = fs2.readFileSync(__dirname + "/../index.js", "utf8")
 			.replace("enableCodeRedemption: false", "enableCodeRedemption: true")
-			.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/test"');
+			.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
 		vm2.runInContext(code, sandbox);
 		let rejected = false;
 		try {
@@ -476,7 +502,7 @@ function load (overrides = {}) {
 				};
 			}
 		});
-		api.config.genshin.data = ["ltuid_v2=111; x=1", "ltuid_v2=222; y=2"];
+		api.config.genshin.data = ["ltuid_v2=111; ltoken_v2=abc; x=1", "ltuid_v2=222; ltoken_v2=abc; y=2"];
 		await api.checkInAllGames();
 		// Each account must claim the codes independently
 		const a = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
@@ -527,6 +553,138 @@ function load (overrides = {}) {
 		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
 		assert.ok(stored.includes("OLD1") && stored.includes("OLD2"), "legacy codes carried into per-uid key");
 		assert.ok(stored.includes("TESTCODE1"), "new codes also present");
+	});
+
+	// 20a. legacy per-game key must NOT seed EVERY account — only the first
+	// post-upgrade run's getRedeemedCodes call (migration flag). Without the
+	// flag, account B inherits account A's redeemed list and silently skips
+	// codes it never redeemed.
+	await t("legacy redeemed codes seed only the first account (migration flag)", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [{ code: "LEGACY_ACTIVE", rewards: ["Primogem ×60"] }] },
+			"getGameRecordCard": (url) => {
+				const m = url.match(/uid=(\d+)/);
+				const uid = m ? m[1] : "0";
+				return {
+					retcode: 0,
+					data: {
+						list: [{
+							game_id: 2,
+							game_role_id: uid === "111" ? "800000001" : "800000002",
+							nickname: uid === "111" ? "Alice" : "Bob",
+							level: 55,
+							region: "os_euro"
+						}]
+					}
+				};
+			}
+		});
+		properties["genshin_redeemed_codes"] = '["LEGACY_ACTIVE"]'; // still-live code from pre-upgrade state
+		api.config.genshin.data = ["ltuid_v2=111; ltoken_v2=abc; x=1", "ltuid_v2=222; ltoken_v2=abc; y=2"];
+		await api.manuallyRedeemCodes("genshin", false);
+		// The bug: account B inherits A's redeemed list and NEVER attempts the
+		// legacy-live code. The fix (migration flag): only the first account is
+		// seeded from legacy, so B must hit the cdkey endpoint — while A (who
+		// actually redeemed it in the past) correctly does not re-attempt.
+		const legacyAttempts = fetchLog.filter(u => u.includes("cdkey=LEGACY_ACTIVE"));
+		assert.strictEqual(legacyAttempts.length, 1, `only account B attempts the legacy-live code (got ${legacyAttempts.length})`);
+		const b = JSON.parse(properties["genshin_redeemed_codes_800000002"] || "[]");
+		assert.ok(b.includes("LEGACY_ACTIVE"), "account B persisted the legacy-live code after redeeming it");
+		assert.ok(properties["genshin_legacy_migrated"] === "1", "migration flag recorded");
+	});
+
+	// 20b. saveBlockedCodes must cap the list at 200 entries like
+	// saveRedeemedCodes does (9KB Script Properties value limit) — otherwise a
+	// long-running user eventually hits setProperty throwing.
+	await t("saveBlockedCodes caps the blocked list at 200 entries", async () => {
+		const api = load();
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const many = Array.from({ length: 250 }, (_, i) => `CODE_${i}`);
+		await game.saveBlockedCodes(many, "800000001");
+		const stored = JSON.parse(properties["genshin_blocked_codes_800000001"] || "[]");
+		assert.strictEqual(stored.length, 200, `blocked list capped at 200 (got ${stored.length})`);
+		assert.ok(stored[0] === "CODE_50", "keeps the NEWEST entries (slice(-200))");
+		assert.ok(stored[199] === "CODE_249", "last entry preserved");
+	});
+
+	// 20c. Every Game HTTP call must set muteHttpExceptions:true — otherwise
+	// UrlFetchApp throws on 403/429/5xx BEFORE guardResponse runs, and the
+	// whole transient/blocked/cookie-expired classification becomes dead code.
+	await t("all Game API calls send muteHttpExceptions:true (guardResponse reachable)", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		// getAccountDetails, getSignInfo, getAwardsData, sign, redeemCode
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		await game.getAccountDetails({}, "12345678");
+		await game.getSignInfo(COOKIE);
+		await game.getAwardsData(COOKIE);
+		await game.sign(COOKIE);
+		await game.redeemCode({ cookie: COOKIE, region: "EU", uid: "800000001" }, "TESTCODE1");
+		const bad = fetchOptsLog.filter(e => !e.mute);
+		assert.strictEqual(bad.length, 0, `every fetch opts muteHttpExceptions (unmuted: ${bad.map(e => e.url.slice(0, 60)).join(", ") || "none"})`);
+	});
+
+	// 20d. cdkey must be URL-encoded in the redemption URL — a non-alphanumeric
+	// character in a code would otherwise silently corrupt the query string.
+	await t("getRedemptionUrl URL-encodes the cdkey parameter", async () => {
+		const api = load();
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const url = game.getRedemptionUrl({ region: "EU", uid: "800000001" }, "ABC&D=1");
+		assert.ok(url.includes("cdkey=ABC%26D%3D1"), `cdkey encoded in URL (got: ${url.slice(url.indexOf("cdkey="))})`);
+		assert.ok(!url.includes("cdkey=ABC&D=1"), "raw ampersand must not survive in cdkey");
+	});
+
+	// 20e. getWebhook must refuse non-Discord URLs — a typo in WEBHOOK_URL
+	// would otherwise POST account nicknames/UIDs to an arbitrary host.
+	await t("getWebhook rejects non-Discord webhook URLs", async () => {
+		const api = load();
+		properties["WEBHOOK_URL"] = "https://example.com/hook/123/abc";
+		assert.strictEqual(api.getWebhook(), null, "non-Discord URL refused");
+		properties["WEBHOOK_URL"] = "https://discord.com/api/webhooks/1234567890/abcdef";
+		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/1234567890/abcdef", "valid Discord webhook accepted");
+		properties["WEBHOOK_URL"] = "https://canary.discord.com/api/webhooks/1/xyz";
+		assert.strictEqual(api.getWebhook(), "https://canary.discord.com/api/webhooks/1/xyz", "canary subdomain accepted");
+		delete properties["WEBHOOK_URL"];
+		// No stored property -> falls back to the inline DISCORD_WEBHOOK constant
+		// (the harness replaces it with a valid URL), so getWebhook must return
+		// that valid value — not null and not a rejected URL.
+		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/1234567890/testhook", "falls back to valid inline webhook");
+	});
+
+	// 20f. device-id must be cached per run — browserHeaders is called on every
+	// HTTP request, and each PropertiesService read is a slow round-trip.
+	await t("device id read from Properties only once per run (cached)", () => {
+		const api = load();
+		api.browserHeaders(COOKIE);
+		api.browserHeaders(COOKIE);
+		api.browserHeaders(COOKIE);
+		api.browserHeaders(COOKIE);
+		api.browserHeaders(COOKIE);
+		const reads = propertyReads["DEVICE_ID_12345678"] || 0;
+		assert.strictEqual(reads, 1, `DEVICE_ID_<ltuid> fetched once (got ${reads})`);
+	});
+
+	// 20g. browserHeaders must not send empty custom headers — Honkai returns
+	// "" from getSignGameHeader(), and an empty x-rpc-signgame header is junk
+	// that some HoYoLAB endpoints reject.
+	await t("browserHeaders drops empty custom headers (honkai signgame)", () => {
+		const api = load();
+		const headers = api.browserHeaders(COOKIE, { "x-rpc-signgame": "" }, { withReferer: true });
+		assert.ok(!("x-rpc-signgame" in headers), "empty x-rpc-signgame not sent");
+		assert.ok("x-rpc-device_id" in headers, "other headers unaffected");
+		const headers2 = api.browserHeaders(COOKIE, { "x-rpc-signgame": "hk4e_global" }, { withReferer: true });
+		assert.strictEqual(headers2["x-rpc-signgame"], "hk4e_global", "non-empty value still sent");
+	});
+
+	// 20h. Cookie with ltuid but NO ltoken fails later with a confusing retcode
+	// — warn early, like the existing "missing ltuid" check.
+	await t("cookie without ltoken is flagged early, run completes", async () => {
+		const api = load();
+		api.config.genshin.data = ["ltuid_v2=12345678; cookie_token=abc"];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0];
+		assert.ok(msg.includes("ltoken"), `explicit ltoken warning in report (got: ${msg.slice(0, 200)})`);
+		assert.ok(!msg.includes("Unexpected error"), "no generic catch-all error");
 	});
 
 	// 21. retcode -1048 (busy) -> treated as cooldown, not persisted, no ❌
@@ -768,6 +926,37 @@ function load (overrides = {}) {
 		assert.ok(msg.includes("Stopping early"), "warning about early stop in report");
 	});
 
+	// 33a. The same 6-minute guard must also apply to the account loop in
+	// checkAndExecute — many accounts × slow sign-in can blow the budget
+	// BEFORE the redemption loop ever starts.
+	await t("checkAndExecute stops account loop when maxExecutionTimeMs is exceeded", async () => {
+		const api = load();
+		api.config.maxExecutionTimeMs = 0; // already over budget
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const signHits = fetchLog.filter(u => u.includes("/sign") || u.includes("/info?")).length;
+		assert.strictEqual(signHits, 0, "no sign-in request after budget exhausted");
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("Stopping early"), "warning about early stop in report");
+	});
+
+	// 33b. createDailyTrigger deletes stale checkInAllGames triggers and
+	// installs one daily trigger at the requested hour.
+	await t("createDailyTrigger replaces old triggers with a daily 8am trigger", () => {
+		const api = load();
+		// Simulate a pre-existing stale trigger (e.g. from an earlier manual
+		// setup): the helper must remove it, not stack a duplicate.
+		triggerLog.push({ action: "create", handler: "checkInAllGames", hour: 9, everyDays: 1 });
+		api.createDailyTrigger(8);
+		const creates = triggerLog.filter(t => t.action === "create");
+		const deletes = triggerLog.filter(t => t.action === "delete");
+		const daily = creates.filter(t => t.handler === "checkInAllGames");
+		assert.strictEqual(daily.length, 1, "exactly one checkInAllGames trigger created");
+		assert.strictEqual(daily[0].hour, 8, "trigger created at requested hour");
+		assert.strictEqual(daily[0].everyDays, 1, "trigger repeats every day");
+		assert.ok(deletes.length >= 1, "stale triggers removed");
+	});
+
 	// 34. 403 Cloudflare/WAF on redemption -> blocked flag, no JSON.parse crash
 	await t("redeemCode 403 returns blocked, does not crash on HTML body", async () => {
 		const api = load({
@@ -866,8 +1055,8 @@ function load (overrides = {}) {
 	// 42. getWebhook trims whitespace around the stored URL
 	await t("getWebhook trims trailing/leading whitespace", () => {
 		const api = load();
-		properties["WEBHOOK_URL"] = "  https://discord.com/api/webhooks/trimmed  ";
-		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/trimmed", "whitespace removed");
+		properties["WEBHOOK_URL"] = "  https://discord.com/api/webhooks/1234567890/trimmed  ";
+		assert.strictEqual(api.getWebhook(), "https://discord.com/api/webhooks/1234567890/trimmed", "whitespace removed");
 	});
 
 	// 43. extractLtuid tolerates spaces around '='
