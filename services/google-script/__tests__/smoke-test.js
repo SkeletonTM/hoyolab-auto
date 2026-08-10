@@ -963,6 +963,18 @@ function load (overrides = {}) {
 		assert.ok(deletes.length >= 1, "stale triggers removed");
 	});
 
+	// 33c. createDailyTrigger must fail fast on an invalid hour — a bad value
+	// would otherwise blow up inside ScriptApp.atHour() with an opaque error
+	// and leave the caller without a working trigger.
+	await t("createDailyTrigger rejects hour outside 0-23", () => {
+		const api = load();
+		assert.throws(() => api.createDailyTrigger(25), /must be an integer 0-23/, "hour 25 rejected");
+		assert.throws(() => api.createDailyTrigger(-1), /must be an integer 0-23/, "hour -1 rejected");
+		assert.throws(() => api.createDailyTrigger("8"), /must be an integer 0-23/, "non-integer rejected");
+		assert.doesNotThrow(() => api.createDailyTrigger(0), "hour 0 accepted");
+		assert.doesNotThrow(() => api.createDailyTrigger(23), "hour 23 accepted");
+	});
+
 	// 34. 403 Cloudflare/WAF on redemption -> blocked flag, no JSON.parse crash
 	await t("redeemCode 403 returns blocked, does not crash on HTML body", async () => {
 		const api = load({

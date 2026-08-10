@@ -1714,6 +1714,12 @@ function checkInGame (gameName) {
 // time-driven trigger at the given hour. Call this from the Apps Script
 // editor (or an onOpen custom menu) instead of clicking through Triggers UI.
 function createDailyTrigger (hour = 8) {
+	// Fail fast: ScriptApp.atHour() throws an opaque error for out-of-range
+	// hours and leaves the caller with no trigger at all — a clear message
+	// beats a broken schedule.
+	if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+		throw new Error(`createDailyTrigger: hour must be an integer 0-23, got ${hour}`);
+	}
 	const target = "checkInAllGames";
 	ScriptApp.getProjectTriggers().forEach(trigger => {
 		if (trigger.getHandlerFunction() === target) {
