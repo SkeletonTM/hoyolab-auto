@@ -121,7 +121,14 @@ function getWebhook () {
 	const value = stored || DISCORD_WEBHOOK;
 	// Trim whitespace: a pasted webhook with a trailing space breaks
 	// UrlFetchApp with a DNS error, so never send the raw value.
-	return value ? value.trim() : null;
+	const trimmed = value ? value.trim() : "";
+	// Only accept real Discord webhook URLs. Without this, a typo in
+	// WEBHOOK_URL POSTs account nicknames/UIDs to an arbitrary host.
+	if (!/^https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/.test(trimmed)) {
+		console.error("getWebhook: URL doesn't look like a Discord webhook — refusing to send");
+		return null;
+	}
+	return trimmed;
 }
 
 function getDiscordUserId () {
@@ -182,8 +189,12 @@ function guardResponse (response) {
 // account makes the traffic look like one real client instead of an
 // anonymous script, which reduces Geetest/CAPTCHA friction. The id is a
 // random UUID minted once per ltuid and persisted in Script Properties.
+// DEVICE_ID_CACHE avoids a PropertiesService round-trip on every request —
+// browserHeaders() runs per fetch, and each read is a slow storage call.
+const DEVICE_ID_CACHE = new Map();
 function getOrCreateDeviceId (ltuid) {
 	if (!ltuid) return null;
+	if (DEVICE_ID_CACHE.has(ltuid)) return DEVICE_ID_CACHE.get(ltuid);
 	const props = PropertiesService.getScriptProperties();
 	const key = `DEVICE_ID_${ltuid}`;
 	let id = props.getProperty(key);
@@ -191,6 +202,7 @@ function getOrCreateDeviceId (ltuid) {
 		id = Utilities.getUuid();
 		props.setProperty(key, id);
 	}
+	DEVICE_ID_CACHE.set(ltuid, id);
 	return id;
 }
 
@@ -216,6 +228,11 @@ function browserHeaders (cookie, extra = {}, opts = {}) {
 		base.Referer = "https://act.hoyolab.com/";
 		base.Origin = "https://act.hoyolab.com";
 	}
+	// Drop empty custom headers — Honkai's getSignGameHeader() returns "",
+	// and an empty x-rpc-signgame header is junk some endpoints reject.
+	for (const k of Object.keys(base)) {
+		if (base[k] === "") delete base[k];
+	}
 	return base;
 }
 
@@ -225,7 +242,7 @@ function browserHeaders (cookie, extra = {}, opts = {}) {
 // Hum-Bao/hoyoverse-codes (GitHub-hosted txt files, open source). Each source
 // defines a URL builder and a parser; the fetch layer is the same.
 //
-// fetchCodes() hits every source in CODE_SOURCE_ORDER in parallel and merges
+// fetchCodes() hits every source in CODE_SOURCE_ORDER and merges
 // the results, so adding a third source is just appending to CODE_SOURCES and
 // the order array.
 const CODE_SOURCES = {
@@ -276,7 +293,9 @@ async function fetchFromSource (source, gameParam) {
 }
 
 async function fetchCodes (gameParam) {
-	// Hit every source in parallel, merge by code. A source that fails or
+	// Hit every source and merge by code. NOTE: in GAS this is sequential —
+	// UrlFetchApp.fetch blocks the event loop, so Promise.allSettled only
+	// collects results, it does not parallelize. A source that fails or
 	// returns 0 codes is logged but does not block the others. If all sources
 	// fail we return an empty array, matching the behaviour of the original
 	// single-source fetchCodes() so the caller sees the same shape.
@@ -308,7 +327,7 @@ async function fetchCodes (gameParam) {
 }
 
 // Buffered notification messages. checkInGame() collects lines into a
-// per-game buffer so concurrent games never interleave and a flush triggered
+// per-game buffer so games never interleave and a flush triggered
 // by one game's failure can't steal another game's pending lines; buffers are
 // merged into NOTIFICATIONS right before flushDiscordNotifications().
 const NOTIFICATIONS = [];
@@ -667,10 +686,22 @@ class Game {
 
 		const success = [];
 		for (const cookie of accounts) {
+			// Same 6-minute budget guard as the redemption loops: many accounts
+			// × slow sign-in can exhaust the budget before codes are touched.
+			if (typeof config.maxExecutionTimeMs === "number" && Date.now() - SCRIPT_START_TIME >= config.maxExecutionTimeMs) {
+				logNotification("warn", this.fullName, "Stopping early: execution time limit reached (see config.maxExecutionTimeMs)", buffer);
+				break;
+			}
 			try {
 				const ltuid = extractLtuid(cookie);
 				if (!ltuid) {
 					logNotification("error", this.fullName, "Cookie is missing ltuid/ltuid_v2 — grab a fresh cookie (see README step 2)", buffer);
+					continue;
+				}
+				// ltuid alone isn't enough: without ltoken the sign requests fail
+				// later with a confusing retcode, so warn here instead.
+				if (!/ltoken(_v2)?\s*=/i.test(cookie)) {
+					logNotification("error", this.fullName, "Cookie is missing ltoken/ltoken_v2 — grab a fresh cookie (see README step 2)", buffer);
 					continue;
 				}
 				const accountDetails = await this.getAccountDetails(cookie, ltuid);
@@ -803,9 +834,10 @@ class Game {
 
 // The record-card endpoint returns every game profile for the account in one
 // response; cache the in-flight Promise per ltuid for the duration of this run
-// so multi-game accounts (games run concurrently via Promise.allSettled) don't
-// trigger one request per game. Caching the Promise — not just the resolved
-// value — is what dedupes the concurrent callers.
+// so multi-game accounts (games run via Promise.allSettled; in GAS the
+// blocking UrlFetchApp makes them sequential, but the cache still avoids
+// one request per game) don't trigger duplicate calls. Caching the Promise —
+// not just the resolved value — is what dedupes the callers.
 	async getAccountDetails (cookieData, ltuid) {
 		try {
 			let pending = GLOBAL_RECORD_CARD_CACHE.get(ltuid);
@@ -813,6 +845,7 @@ class Game {
 				pending = (async () => {
 					const options = {
 						method: "GET",
+						muteHttpExceptions: true,
 						headers: browserHeaders(cookieData)
 					};
 
@@ -866,6 +899,7 @@ class Game {
 			const options = {
 				method: "POST",
 				contentType: "application/json",
+				muteHttpExceptions: true,
 				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
 				}, { withReferer: true }),
@@ -932,6 +966,7 @@ class Game {
 		try {
 			const url = `${this.config.url.info}?act_id=${this.config.ACT_ID}`;
 			const response = await UrlFetchApp.fetch(url, {
+				muteHttpExceptions: true,
 				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
 				}, { withReferer: true })
@@ -979,6 +1014,7 @@ class Game {
 		try {
 			const url = `${this.config.url.home}?act_id=${this.config.ACT_ID}`;
 			const response = await UrlFetchApp.fetch(url, {
+				muteHttpExceptions: true,
 				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
 				}, { withReferer: true })
@@ -1321,6 +1357,7 @@ class Game {
 			const url = this.getRedemptionUrl(account, code);
 			const options = {
 				method: this.name === "starrail" ? "POST" : "GET",
+				muteHttpExceptions: true,
 				headers: browserHeaders(account.cookie)
 			};
 
@@ -1417,7 +1454,7 @@ class Game {
 			`lang=en`,
 			`uid=${account.uid}`,
 			`region=${internalRegion}`,
-			`cdkey=${code}`
+			`cdkey=${encodeURIComponent(code)}`
 		];
 
 		switch (this.name) {
@@ -1487,9 +1524,10 @@ class Game {
 	//
 	// Migration: the old key was `<game>_redeemed_codes`. For a single account
 	// we still read it once so existing users don't suddenly re-attempt every
-	// code; as soon as anything is written the per-uid key takes over. For
-	// multi-account this is safe too: it only ever seeds the FIRST account that
-	// runs, and never blocks a code that other accounts haven't used yet.
+	// code. The `<game>_legacy_migrated` flag guarantees it seeds only the
+	// FIRST account that runs after an upgrade — without it, accounts B, C, …
+	// would inherit account A's redeemed list and skip codes they never
+	// redeemed (silent reward loss on multi-account setups).
 	getRedeemedCodes (uid) {
 		const props = PropertiesService.getScriptProperties();
 		const uidKey = `${this.name}_redeemed_codes_${uid}`;
@@ -1500,15 +1538,26 @@ class Game {
 			}
 			catch (e) { /* malformed — fall through */ }
 		}
-		// Migration fallback: old per-game key. Only used for a first run after
-		// upgrade and only as a read seed (see comment above).
-		const legacy = props.getProperty(`${this.name}_redeemed_codes`);
-		if (legacy) {
-			try {
-				const arr = JSON.parse(legacy);
-				if (Array.isArray(arr)) return arr;
+		// Migration fallback: old per-game key. Consumed exactly once, tracked
+		// by the migration flag (set even when no legacy value exists, so a
+		// later upgrade can't re-seed). When legacy IS found we persist it into
+		// this account's per-uid key right away, so the subsequent
+		// saveRedeemedCodes (which only appends newly-claimed codes) can't
+		// drop it — and later runs read the normal per-uid path.
+		const migratedKey = `${this.name}_legacy_migrated`;
+		if (!props.getProperty(migratedKey)) {
+			props.setProperty(migratedKey, "1");
+			const legacy = props.getProperty(`${this.name}_redeemed_codes`);
+			if (legacy) {
+				try {
+					const arr = JSON.parse(legacy);
+					if (Array.isArray(arr)) {
+						props.setProperty(uidKey, JSON.stringify(arr));
+						return arr;
+					}
+				}
+				catch (e) { /* ignore */ }
 			}
-			catch (e) { /* ignore */ }
 		}
 		return [];
 	}
@@ -1533,14 +1582,21 @@ class Game {
 		}
 		else {
 			// First write for this account: seed from the legacy per-game key so
-			// codes redeemed before the per-account migration aren't retried.
-			const legacy = props.getProperty(`${this.name}_redeemed_codes`);
-			if (legacy) {
-				try {
-					const arr = JSON.parse(legacy);
-					if (Array.isArray(arr)) redeemedCodes = arr;
+			// codes redeemed before the per-account migration aren't retried —
+			// but ONLY while the migration flag is unset (see getRedeemedCodes).
+			// Without the flag check, account B's first write would re-seed A's
+			// list even after getRedeemedCodes already consumed it.
+			const migratedKey = `${this.name}_legacy_migrated`;
+			if (!props.getProperty(migratedKey)) {
+				props.setProperty(migratedKey, "1");
+				const legacy = props.getProperty(`${this.name}_redeemed_codes`);
+				if (legacy) {
+					try {
+						const arr = JSON.parse(legacy);
+						if (Array.isArray(arr)) redeemedCodes = arr;
+					}
+					catch (e) { /* ignore malformed legacy value */ }
 				}
-				catch (e) { /* ignore malformed legacy value */ }
 			}
 		}
 		for (const code of codes) {
@@ -1589,6 +1645,7 @@ class Game {
 				blockedCodes.push(code);
 			}
 		}
+		blockedCodes = blockedCodes.slice(-200); // same 9KB-value guard as saveRedeemedCodes
 		props.setProperty(uidKey, JSON.stringify(blockedCodes));
 	}
 }
@@ -1606,8 +1663,9 @@ function checkInGame (gameName) {
 	// "no new check-ins" branch need the same array.
 	const cookies = getCookies(gameName);
 	const game = new Game(gameName, { data: cookies });
-	// Per-game notification buffer: games run concurrently via Promise.all in
-	// checkInAllGames, and writing into one shared array would interleave lines
+	// Per-game notification buffer: games run via Promise.allSettled in
+	// checkInAllGames (sequential in GAS, but the buffer keeps lines tidy),
+	// and writing into one shared array would interleave lines
 	// and let a failure-triggered flush steal another game's pending messages.
 	const buffer = [];
 
@@ -1651,6 +1709,32 @@ function checkInGame (gameName) {
 		});
 }
 
+// One-click daily schedule: deletes any existing checkInAllGames triggers
+// (so re-running the helper can't stack duplicates) and installs a single
+// time-driven trigger at the given hour. Call this from the Apps Script
+// editor (or an onOpen custom menu) instead of clicking through Triggers UI.
+function createDailyTrigger (hour = 8) {
+	const target = "checkInAllGames";
+	ScriptApp.getProjectTriggers().forEach(trigger => {
+		if (trigger.getHandlerFunction() === target) {
+			ScriptApp.deleteTrigger(trigger);
+		}
+	});
+	ScriptApp.newTrigger(target)
+		.timeBased()
+		.everyDays(1)
+		.atHour(hour)
+		.create();
+	console.log(`createDailyTrigger: daily ${target} trigger set for ${hour}:00`);
+}
+
+// NOTE on async entry points: GAS triggers do NOT await the returned Promise.
+// This code is only correct because UrlFetchApp.fetch is blocking, so every
+// await resolves on the drained microtask queue within the same synchronous
+// stack. Introducing any real asynchronous work (e.g. fetchAll, setTimeout,
+// an external async library) would silently truncate execution at the end of
+// the trigger call — keep entry points synchronous-blocking or revisit the
+// trigger wiring (onOpen custom menu / time-driven trigger) accordingly.
 function checkInAllGames () {
 	// Concurrency guard: a time-driven trigger can fire while a manual run is
 	// in progress (or two triggers can overlap). Without a lock, both would
@@ -1694,6 +1778,10 @@ function checkInAllGames () {
 		.finally(() => lock.releaseLock());
 }
 
+// Manual trigger: redeem codes for one game right now. Same async note as
+// checkInAllGames — GAS callers (custom menu / manual run) don't await the
+// Promise; safe only because all awaits resolve synchronously via blocking
+// UrlFetchApp.
 function manuallyRedeemCodes (gameName, forceRedeem = false) {
 	// Same concurrency guard as checkInAllGames: a manual redeem triggered
 	// while the daily run is still working would double-redeem and double-post.
@@ -1746,6 +1834,12 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 			if (!ltuid) {
 				logNotification("error", gameName, "Cookie is missing ltuid/ltuid_v2 — grab a fresh cookie (see README step 2)");
 				return { success: false, message: `Invalid cookie for ${gameName}: no ltuid` };
+			}
+			// Same early check as checkAndExecute: no ltoken means the
+			// redemption requests fail later with a confusing retcode.
+			if (!/ltoken(_v2)?\s*=/i.test(cookieData)) {
+				logNotification("error", gameName, "Cookie is missing ltoken/ltoken_v2 — grab a fresh cookie (see README step 2)");
+				return { success: false, message: `Invalid cookie for ${gameName}: no ltoken` };
 			}
 			const accountDetails = await game.getAccountDetails(cookieData, ltuid);
 
