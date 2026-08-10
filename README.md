@@ -155,6 +155,7 @@ If you set a webhook, the Discord report arrives within seconds.
 | `enableCodeRedemption` | `false` | Redeem active promo codes for accounts that just signed in |
 | `redeemCodesEvenIfSignedIn` | `false` | Also redeem codes for accounts already signed in today |
 | `redeemSleepMs` | `6000` | Pause (ms) between code redemptions — rate-limit guard; hard floor 2000 ms enforced |
+| `maxExecutionTimeMs` | `300000` | Hard cap on total runtime (ms) so the run finishes before the GAS 6-minute limit; `0` stops immediately (tests) |
 
 ### Code outcomes
 
@@ -171,12 +172,12 @@ How the script classifies each redemption attempt (by API retcode):
 
 ### Code sources
 
-Active promo codes are pulled from **two** community aggregators in parallel and merged (deduplicated):
+Active promo codes are pulled from **two** community aggregators and merged (deduplicated):
 
 - [api.ennead.cc](https://api.ennead.cc/mihoyo/genshin/codes) — torikushiii's JSON aggregator
 - [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) — GitHub-hosted txt files, updated daily
 
-Running both in parallel means a single outage doesn't block redemption. If both fail, the run reports 0 codes and moves on. To add a third source, append an entry to `CODE_SOURCES` and to `CODE_SOURCE_ORDER` in `index.js`.
+Running both means a single outage doesn't block redemption. (Note: in GAS the fetches run sequentially — `UrlFetchApp.fetch` blocks the event loop — so the second source is a fallback, not real parallelism.) If both fail, the run reports 0 codes and moves on. To add a third source, append an entry to `CODE_SOURCES` and to `CODE_SOURCE_ORDER` in `index.js`.
 
 ### Storing secrets in Script Properties
 
@@ -234,6 +235,7 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | **Nothing in Discord** | Check `DISCORD_WEBHOOK` is the full `https://discord.com/api/webhooks/…` URL. Check **Executions** for a `flushDiscordNotifications` error. If every account was already signed in and nothing else happened, the buffer is empty and the script deliberately sends nothing. |
 | **"HoYoLAB server unavailable (HTTP 5xx/429) — retry later"** | Transient — the API is down or rate-limiting. Nothing is broken; nothing is marked redeemed; the next run retries. If it persists for hours, check HoYoLAB announcements. |
 | **"Cookie is missing ltuid/ltuid_v2"** | The cookie is a partial copy or expired. Re-grab the full cookie (step 2, from the `getGameRecordCard` request). |
+| **"Cookie is missing ltoken/ltoken_v2"** | Same fix — the cookie is partial; re-grab it the same way. |
 | **`Error: undefined`** | The underlying error had no `.message`. The function name in the surrounding text tells you which API call failed; full error is in **Executions**. |
 | **"cookie expired — grab a fresh one"** | Cookie expired (`-1071`/`-100`/`-10001`). The script stops that account's codes and reports once. Re-grab the cookie. |
 | **Already signed in, but codes not claimed** | Default: codes only redeem for accounts that *just* signed in. Set `redeemCodesEvenIfSignedIn: true`, or force once with `redeemGenshinCodes(true)` etc. |
@@ -250,7 +252,7 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | Discord notifications on errors | ❌ | ✅ |
 | Webhook POSTs per run | up to 4 × accounts | exactly 1 |
 | Files in the repo | 100+ | 9 |
-| Code source | `api.ennead.cc` only | `api.ennead.cc` + Hum-Bao, merged in parallel |
+| Code source | `api.ennead.cc` only | `api.ennead.cc` + Hum-Bao, merged from both |
 
 ---
 
