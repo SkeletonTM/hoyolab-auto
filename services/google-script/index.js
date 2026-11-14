@@ -718,6 +718,9 @@ class Game {
 					else if (info.cookieExpired) {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Cookie expired — grab a fresh one (README step 2)`, buffer);
 					}
+					else if (info.blocked) {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Blocked by HoYoLAB WAF/Cloudflare (HTTP 403) — skipping account`, buffer);
+					}
 					else {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get sign info`, buffer);
 					}
@@ -755,6 +758,9 @@ class Game {
 				if (!awardsData.success) {
 					if (awardsData.transient) {
 						logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): HoYoLAB server unavailable (awards) — retry later`, buffer);
+					}
+					else if (awardsData.blocked) {
+						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Blocked by HoYoLAB WAF/Cloudflare (HTTP 403) — skipping account`, buffer);
 					}
 					else {
 						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`, buffer);
@@ -823,9 +829,10 @@ class Game {
 			console.error(`${this.fullName}:CheckIn`, e);
 			const msg = String(e?.message || e);
 			// getAccountDetails throws human-readable messages for cookie
-			// problems; pass those through rather than a generic wrapper.
-			logNotification("error", this.fullName,
-				msg.startsWith("cookie invalid/expired") ? msg : `Unexpected error: ${msg}`, buffer);
+			// problems and WAF blocks; pass those through rather than a
+			// generic wrapper.
+			const readable = msg.startsWith("cookie invalid/expired") || msg.startsWith("Blocked by HoYoLAB WAF");
+			logNotification("error", this.fullName, readable ? msg : `Unexpected error: ${msg}`, buffer);
 		}
 	}
 
@@ -854,6 +861,12 @@ class Game {
 					const g = guardResponse(response);
 					if (g.transient) {
 						throw new Error(`HoYoLAB server unavailable (HTTP ${g.status}) — try again later`);
+					}
+					// 403 answers with an HTML body: JSON.parse would throw a
+					// SyntaxError that says nothing about the real cause, so
+					// fail with the actionable WAF message instead.
+					if (g.blocked) {
+						throw new Error(`Blocked by HoYoLAB WAF/Cloudflare (HTTP ${g.status}) — try again later`);
 					}
 					const data = JSON.parse(response.getContentText());
 
@@ -1023,6 +1036,10 @@ class Game {
 			if (g.transient) {
 				console.error(`${this.fullName}:getAwardsData`, `HTTP ${g.status} — server unavailable, retry later`);
 				return { success: false, transient: true };
+			}
+			if (g.blocked) {
+				console.error(`${this.fullName}:getAwardsData`, "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403).");
+				return { success: false, blocked: true, message: "blocked by HoYoLAB WAF/Cloudflare" };
 			}
 			const data = JSON.parse(response.getContentText());
 
@@ -1657,6 +1674,26 @@ function truncateMsg (msg, max = 80) {
 	return s.length > max ? s.substring(0, max) + "…" : s;
 }
 
+// Apps Script persists console output to the Execution log and mirrors it to
+// Cloud Logging. `success` entries carry the raw auth cookie because the
+// redemption call consumes it, so those objects must never be handed to
+// console.* — log this metadata-only projection instead. (Issue #2, High:
+// the full ltoken used to land in the execution log on every run.)
+function loggableSuccess (success) {
+	const account = success.account || {};
+	return {
+		platform: success.platform,
+		total: success.total,
+		alreadySigned: success.alreadySigned === true,
+		account: {
+			uid: account.uid,
+			nickname: account.nickname,
+			rank: account.rank,
+			region: account.region
+		}
+	};
+}
+
 function checkInGame (gameName) {
 	// Read cookies once: PropertiesService is a paid store — every extra read
 	// is a wasted round-trip, and both the Game constructor and the
@@ -1671,7 +1708,7 @@ function checkInGame (gameName) {
 
 	return game.checkAndExecute(buffer)
 		.then(async (successes) => {
-			console.log(`Successful check-ins for ${gameName}:`, successes);
+			console.log(`Successful check-ins for ${gameName}:`, successes.map(loggableSuccess));
 
 			if (!config.enableCodeRedemption) {
 				console.log(`Code redemption is disabled in config for ${gameName}`);

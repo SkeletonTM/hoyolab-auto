@@ -42,16 +42,36 @@ let responseMap = {};
 let properties = {};
 let propertyReads = {}; // per-key getProperty call counter (device-id caching assertion)
 let postedToDiscord = [];
+let consoleLog = []; // every console.* call from index.js, arguments serialized
 let lockAvailable = true; // LockService stub: false simulates another instance running
+let lockHeld = false; // LockService state: true while a run holds the script lock
 let sleepCalls = []; // Utilities.sleep(ms) invocations (429 retry, redeem pacing)
 let triggerLog = []; // ScriptApp actions: {action, handler, hour?} (createDailyTrigger assertions)
 let headerLog = []; // opts.headers from every UrlFetchApp call (device_id assertions)
 let uuidCounter = 0;
 let discordResponder = null; // optional per-test Discord responder; null = default 204
 
+// console shim: records every call (serialized) so tests can assert what the
+// script writes to the Apps Script execution log, then forwards to the real
+// console. Object arguments are JSON-serialized exactly like GAS Cloud Logging
+// would persist them — that is what makes a leaked cookie detectable.
+function makeConsole () {
+	const serialize = args => args.map(a => {
+		if (typeof a === "string") return a;
+		try { return JSON.stringify(a); } catch (e) { return String(a); }
+	}).join(" ");
+	const wrap = fn => (...args) => { consoleLog.push(serialize(args)); fn(...args); };
+	return {
+		log: wrap(console.log),
+		info: wrap(console.info),
+		warn: wrap(console.warn),
+		error: wrap(console.error)
+	};
+}
+
 function makeSandbox () {
 	return {
-		console,
+		console: makeConsole(),
 		JSON, Math, Date, Array, Object, String, Number, Map, Promise, Error, RegExp,
 		Utilities: {
 			sleep: ms => { sleepCalls.push(ms); },
@@ -81,8 +101,16 @@ function makeSandbox () {
 		},
 		LockService: {
 			getScriptLock: () => ({
-				tryLock: () => lockAvailable,
-				releaseLock: () => {}
+				// Stateful stub: a held lock stays held until releaseLock() runs,
+				// so a missing release in production code really blocks the next
+				// run. The previous stateless `tryLock: () => lockAvailable`
+				// returned true regardless and could not catch a lock leak.
+				tryLock: () => {
+					if (!lockAvailable || lockHeld) return false;
+					lockHeld = true;
+					return true;
+				},
+				releaseLock: () => { lockHeld = false; }
 			})
 		},
 		PropertiesService: {
@@ -126,6 +154,7 @@ function makeSandbox () {
 
 function load (overrides = {}) {
 	fetchLog = []; fetchOptsLog = []; signBodies = []; postedToDiscord = []; sleepCalls = []; headerLog = [];
+	consoleLog = []; lockHeld = false;
 	uuidCounter = 0; discordResponder = null;
 	properties = {}; propertyReads = {}; triggerLog = []; // fresh script-properties per scenario — tests must not leak state
 	// Object-spread would let defaults overwrite same-key overrides; instead
@@ -1127,6 +1156,86 @@ function load (overrides = {}) {
 		const ids = headerLog.filter(h => h["x-rpc-device_id"]).map(h => h["x-rpc-device_id"]);
 		assert.ok(ids.length > 0, "requests carried device_id");
 		assert.strictEqual(new Set(ids).size, 1, "all requests used the same device_id");
+	});
+
+	// 41. Execution logs must never carry the session cookie (issue #2, High):
+	// Apps Script persists console output to the Execution log / Cloud Logging,
+	// so a cookie in a logged object is a credential leak. Redemption still
+	// needs the cookie, so the flow must keep working after redaction.
+	await t("check-in logs carry no session cookie while redemption still gets it", async () => {
+		const LEAK_COOKIE = "ltuid_v2=12345678; ltoken_v2=LEAKCANARY42; cookie_token_v2=LEAKCANARY42";
+		const api = load();
+		api.config.genshin.data = [LEAK_COOKIE];
+		await api.checkInAllGames();
+		const logs = consoleLog.join("\n");
+		assert.ok(!logs.includes("LEAKCANARY42"), "cookie token never reaches console.*");
+		assert.ok(!/ltoken|ltuid/.test(logs), "no token/uid cookie params in logs");
+		assert.ok(logs.includes("Successful check-ins for genshin"), "check-in summary still logged");
+		assert.ok(logs.includes("800000001"), "account metadata (uid) still logged");
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
+		assert.ok(stored.includes("TESTCODE1"), "redemption still received the cookie and claimed codes");
+	});
+
+	// 42. 403 on the record-card endpoint: guardResponse flags it, but
+	// getAccountDetails used to fall through to JSON.parse on an HTML body.
+	await t("record-card 403 reports WAF block, no JSON.parse garbage", async () => {
+		const api = load({
+			"getGameRecordCard": { getResponseCode: () => 403, getContentText: () => "<html><body>Access denied</body></html>" }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("WAF"), "WAF/Cloudflare message in report");
+		assert.ok(!msg.includes("Unexpected token"), "no HTML parse garbage in report");
+	});
+
+	// 43. 403 on the awards endpoint (same class of bug as the record card).
+	await t("awards 403 reports WAF block, no JSON.parse garbage", async () => {
+		const api = load({
+			"/home?act_id": { getResponseCode: () => 403, getContentText: () => "<html><body>Access denied</body></html>" }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("WAF"), "WAF/Cloudflare message in report");
+		assert.ok(!msg.includes("Unexpected token"), "no HTML parse garbage in report");
+	});
+
+	// 44. 403 on sign-info: getSignInfo already returned blocked, but the caller
+	// ignored it and printed the generic "Failed to get sign info".
+	await t("sign-info 403 reports WAF block, not a generic failure", async () => {
+		const api = load({
+			"/info?act_id": { getResponseCode: () => 403, getContentText: () => "<html><body>Access denied</body></html>" }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("WAF"), "WAF/Cloudflare message in report");
+		assert.ok(!msg.includes("Failed to get sign info"), "no opaque generic message");
+	});
+
+	// 45. Lock leak detection: the stub is stateful now, so an early return
+	// that forgets releaseLock() leaves lockHeld=true and the next run bails.
+	await t("lock is released on the early-return and the normal paths", async () => {
+		const api = load();
+		await assert.rejects(api.manuallyRedeemCodes("badgame", false));
+		assert.strictEqual(lockHeld, false, "invalid-game early return released the lock");
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin", false);
+		assert.strictEqual(lockHeld, false, "finally path released the lock");
+		await api.checkInAllGames();
+		assert.strictEqual(lockHeld, false, "checkInAllGames released the lock");
+	});
+
+	// 46. And the stateful stub really blocks: while one run holds the lock a
+	// second run must skip instead of double-redeeming.
+	await t("a held lock makes the next run skip", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		lockHeld = true; // simulate a run still in flight
+		await api.checkInAllGames();
+		assert.strictEqual(postedToDiscord.length, 0, "second run skipped, no duplicate report");
+		lockHeld = false;
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
