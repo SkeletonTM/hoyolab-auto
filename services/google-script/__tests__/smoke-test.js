@@ -1238,6 +1238,33 @@ function load (overrides = {}) {
 		lockHeld = false;
 	});
 
+	// 47. -2006 = the code hit its global max-usage limit. Final state, not a
+	// retryable failure (upstream 88e731e): retrying it every run spams ❌.
+	await t("redeemCode treats -2006 (usage limit) as final exhausted, not a failure", async () => {
+		const api = load({ "webExchangeCdkey": { retcode: -2006, message: "Redemption code usage limit reached" } });
+		const game = new api.Game("genshin", { data: [COOKIE] });
+		const res = await game.redeemCode({ uid: "800000001", region: "EU", cookie: COOKIE }, "TESTCODE1");
+		assert.strictEqual(res.success, false, "not a success");
+		assert.strictEqual(res.exhausted, true, "classified as exhausted");
+		assert.ok(!res.cookieExpired, "usage limit is not an auth problem");
+	});
+
+	// 48. ... and it is remembered: reported once, never retried on later runs.
+	await t("exhausted code is persisted and not retried next run", async () => {
+		const api = load({ "webExchangeCdkey": { retcode: -2006, message: "Redemption code usage limit reached" } });
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(/limit/i.test(msg), "report mentions the usage limit");
+		assert.ok(!msg.includes("failed —"), "not reported as a plain failure");
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
+		assert.ok(stored.includes("TESTCODE1"), "exhausted code persisted");
+		const before = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		await api.checkInAllGames();
+		const after = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		assert.strictEqual(after, before, "no second attempt for the exhausted code");
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();

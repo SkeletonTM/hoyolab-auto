@@ -346,6 +346,10 @@ const REDEEM_RETCODE_ALREADY_USED = [-2017, -2018];
 
 // "Code expired or never existed" — report as a warning, not an error.
 const REDEEM_RETCODE_EXPIRED_OR_INVALID = [-2001, -2003];
+// "Code hit its global max-usage limit" — a valid code with no uses left.
+// Final state like expired: remember it, otherwise every run retries it and
+// the report shows the same failure forever (upstream 88e731e).
+const REDEEM_RETCODE_EXHAUSTED = [-2006];
 
 // "Redemption is in cooldown" — transient, NOT redeemed and NOT an error.
 // The code should simply be retried later. We must NOT persist it as
@@ -454,7 +458,7 @@ function juFufuContextualLines (lines) {
 //   🎁 [Game] Nick: +2 new — CODE1, CODE2
 //   ⏭️ [Game] Nick: nothing new (11 already redeemed, 2 expired)
 //   ❌ [Game] Nick: 1 failed — CODE3 (Invalid cookie)
-function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], blocked = [], newBlocked = [], isForce = false) {
+function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], blocked = [], newBlocked = [], isForce = false, exhausted = []) {
 	const lines = [];
 	const nick = `${account.nickname} (${account.uid})`.replace(UID_PAREN_RE, "");
 	const label = isForce ? `${nick} (force-run)` : nick;
@@ -477,10 +481,15 @@ function formatCodeReport (gameName, account, total, claimed, skipped, expired, 
 	if (newBlocked.length > 0) {
 		lines.push(`🚫 [${gameName}] ${label}: not eligible for this account — ${newBlocked.join(", ")}`);
 	}
+	// Codes that spent their global usage limit: valid codes nobody can claim
+	// anymore. Persisted, so this line appears exactly once per code.
+	if (exhausted.length > 0) {
+		lines.push(`⚠️ [${gameName}] ${label}: ${exhausted.length} used up (max limit) — ${exhausted.join(", ")}`);
+	}
 	// The quiet line: only when there's nothing exciting to say, or to account
 	// for the remaining codes after a partial success.
 	const quietCount = skipped.length + expired.length + blocked.length;
-	if (claimed.length === 0 && failed.length === 0 && cooldown.length === 0 && newBlocked.length === 0) {
+	if (claimed.length === 0 && failed.length === 0 && cooldown.length === 0 && newBlocked.length === 0 && exhausted.length === 0) {
 		const parts = [];
 		if (skipped.length > 0) parts.push(`${skipped.length} already redeemed`);
 		if (expired.length > 0) parts.push(`${expired.length} expired`);
@@ -1112,6 +1121,7 @@ class Game {
 		const claimed = [];
 		const skipped = [];
 		const expired = [];
+		const exhausted = []; // hit its global usage limit — final, remembered
 		const failed = [];
 		const cooldown = [];
 		const blocked = [];      // already in the per-account blocklist — silent
@@ -1193,6 +1203,11 @@ class Game {
 			else if (result && result.expired) {
 				expired.push(code.code);
 			}
+			else if (result && result.exhausted) {
+				// Valid code whose global usage limit is spent — final state,
+				// remembered like expired so it is never retried.
+				exhausted.push(code.code);
+			}
 			else if (result && result.cooldown) {
 				// Transient cooldown: NOT redeemed, NOT persisted — retried later.
 				cooldown.push(code.code);
@@ -1219,7 +1234,7 @@ class Game {
 		// valid again, so persist them alongside the redeemed ones. Otherwise
 		// every run retries them and the report shows the same ⚠️ forever.
 		// (Cooldown/busy are transient and stay unpersisted — retried later.)
-		const toPersist = [...newlyRedeemed, ...expired];
+		const toPersist = [...newlyRedeemed, ...expired, ...exhausted];
 		if (toPersist.length > 0) {
 			this.saveRedeemedCodes(toPersist, account.uid);
 		}
@@ -1227,7 +1242,7 @@ class Game {
 			this.saveBlockedCodes(newBlocked, account.uid);
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, false, exhausted));
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
@@ -1238,6 +1253,7 @@ class Game {
 		const claimed = [];
 		const skipped = [];
 		const expired = [];
+		const exhausted = [];
 		const failed = [];
 		const cooldown = [];
 		const blocked = [];
@@ -1305,6 +1321,9 @@ class Game {
 			else if (result && result.expired) {
 				expired.push(code.code);
 			}
+			else if (result && result.exhausted) {
+				exhausted.push(code.code);
+			}
 			else if (result && result.cooldown) {
 				cooldown.push(code.code);
 			}
@@ -1324,7 +1343,7 @@ class Game {
 		// One properties write for the whole account instead of one per code.
 		// Expired/invalid codes (-2001/-2003) are final — persist them too so
 		// later runs don't retry the same dead codes every time.
-		const toPersist = [...newlyRedeemed, ...expired];
+		const toPersist = [...newlyRedeemed, ...expired, ...exhausted];
 		if (toPersist.length > 0) {
 			this.saveRedeemedCodes(toPersist, account.uid);
 		}
@@ -1332,7 +1351,7 @@ class Game {
 			this.saveBlockedCodes(newBlocked, account.uid);
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, true));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, true, exhausted));
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
@@ -1426,6 +1445,10 @@ class Game {
 				if (REDEEM_RETCODE_EXPIRED_OR_INVALID.includes(data.retcode)) {
 					console.log(`Code ${code} expired/invalid for ${this.fullName} (retcode ${data.retcode})`);
 					return { success: false, expired: true, message: data.message || "Expired or invalid code" };
+				}
+				if (REDEEM_RETCODE_EXHAUSTED.includes(data.retcode)) {
+					console.log(`Code ${code} hit its usage limit for ${this.fullName} (retcode ${data.retcode})`);
+					return { success: false, exhausted: true, message: data.message || "Code usage limit reached" };
 				}
 				if (REDEEM_RETCODE_BUSY.includes(data.retcode)) {
 					console.error(`API busy for code ${code} in ${this.fullName}: ${data.message}`);

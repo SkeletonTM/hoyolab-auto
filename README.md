@@ -165,6 +165,7 @@ How the script classifies each redemption attempt (by API retcode):
 |---|---|---|
 | `-2017` / `-2018` | Already redeemed on this account | Skip, remember, never retry |
 | `-2001` / `-2003` | Expired / invalid | Warning (⚠️), remembered, never retried |
+| `-2006` | Code's global usage limit reached | Warning (⚠️), remembered, never retried |
 | `-2016` (cooldown), `-1048` (API busy) | Transient | Not remembered, retried next run |
 | `-1071` / `-100` / `-10001` | Cookie expired | Stop the rest of this account's codes, clear message |
 | `1034` / `10035` / `10041`, or `gt_result.is_risk` | CAPTCHA / risk gate | Stop, asks you to solve manually |
