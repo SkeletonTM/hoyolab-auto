@@ -178,7 +178,7 @@ Active promo codes are pulled from **two** community aggregators and merged (ded
 - [api.ennead.cc](https://api.ennead.cc/mihoyo/genshin/codes) — torikushiii's JSON aggregator
 - [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) — GitHub-hosted txt files, updated daily
 
-Running both means a single outage doesn't block redemption. (Note: in GAS the fetches run sequentially — `UrlFetchApp.fetch` blocks the event loop — so the second source is a fallback, not real parallelism.) If both fail, the run reports 0 codes and moves on. To add a third source, append an entry to `CODE_SOURCES` and to `CODE_SOURCE_ORDER` in `index.js`.
+Running both means a single outage doesn't block redemption. (Note: in GAS the fetches run sequentially — `UrlFetchApp.fetch` blocks the event loop — so the second source is a fallback, not real parallelism.) If one source fails, the codes from the surviving source are still redeemed and the report adds a *"list may be incomplete"* note; if both fail, the report says the sources are unreachable instead of claiming there are no active codes. To add a third source, append an entry to `CODE_SOURCES` and to `CODE_SOURCE_ORDER` in `index.js`.
 
 ### Storing secrets in Script Properties
 

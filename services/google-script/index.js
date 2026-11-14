@@ -458,7 +458,7 @@ function juFufuContextualLines (lines) {
 //   🎁 [Game] Nick: +2 new — CODE1, CODE2
 //   ⏭️ [Game] Nick: nothing new (11 already redeemed, 2 expired)
 //   ❌ [Game] Nick: 1 failed — CODE3 (Invalid cookie)
-function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], blocked = [], newBlocked = [], isForce = false, exhausted = []) {
+function formatCodeReport (gameName, account, total, claimed, skipped, expired, failed, cooldown = [], blocked = [], newBlocked = [], isForce = false, exhausted = [], sourceState = null) {
 	const lines = [];
 	const nick = `${account.nickname} (${account.uid})`.replace(UID_PAREN_RE, "");
 	const label = isForce ? `${nick} (force-run)` : nick;
@@ -503,9 +503,22 @@ function formatCodeReport (gameName, account, total, claimed, skipped, expired, 
 		if (blocked.length > 0) parts.push(`${blocked.length} not eligible`);
 		lines.push(`⏭️ [${gameName}] ${label}: rest — ${parts.join(", ")}`);
 	}
+	const known = sourceState && sourceState.total > 0;
 	if (total === 0) {
+		if (known && sourceState.failed === sourceState.total) {
+			// Every source was down: an outage is not an empty list, and
+			// reporting "no active codes" here would hide missed promos.
+			return [`⚠️ [${gameName}] ${label}: promo-code sources unreachable (${sourceState.failed}/${sourceState.total}) — nothing could be checked`];
+		}
+		const gap = known && sourceState.failed > 0
+			? ` — ${sourceState.failed}/${sourceState.total} sources failed, list may be incomplete`
+			: "";
 		// No active codes at all — one line instead of an empty-looking report.
-		return [`ℹ️ [${gameName}] ${label}: no active promo codes right now`];
+		return [`ℹ️ [${gameName}] ${label}: no active promo codes right now${gap}`];
+	}
+	// Partial outage with codes in hand: still redeem, but flag the gap.
+	if (known && sourceState.failed > 0) {
+		lines.push(`⚠️ [${gameName}] ${label}: ${sourceState.failed}/${sourceState.total} code sources failed — list may be incomplete`);
 	}
 	return lines;
 }
@@ -679,6 +692,7 @@ class Game {
 		this.config = { ...DEFAULT_CONSTANTS[name] };
 		this.data = config.data || [];
 		this._codesCache = null; // Per-run cache for fetchCodes()
+		this._codesSourceState = null; // { ok, failed, total } for the last fetch
 
 		if (this.data.length === 0) {
 			console.warn(`No ${this.fullName} accounts provided. Skipping...`);
@@ -1242,7 +1256,7 @@ class Game {
 			this.saveBlockedCodes(newBlocked, account.uid);
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, false, exhausted));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, false, exhausted, this._codesSourceState));
 	}
 
 	// Force redemption of all codes regardless of previous redemption status
@@ -1351,7 +1365,7 @@ class Game {
 			this.saveBlockedCodes(newBlocked, account.uid);
 		}
 
-		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, true, exhausted));
+		(buffer || NOTIFICATIONS).push(...formatCodeReport(this.fullName, account, codes.length, claimed, skipped, expired, failed, cooldown, blocked, newBlocked, true, exhausted, this._codesSourceState));
 
 		console.log(`Completed forced code redemption for ${this.fullName}`);
 	}
@@ -1368,12 +1382,19 @@ class Game {
 			const hits = Object.entries(sourceHits)
 				.map(([k, v]) => `${k}=${v}`).join(", ");
 			console.log(`${this.fullName}:fetchCodes`, `${hits} -> ${codes.length} unique`);
+			// Remember whether the sources actually answered: an outage must
+			// not look like a successful "zero active codes" lookup in the
+			// report. Values are either a number (answered) or "failed: …".
+			const values = Object.values(sourceHits);
+			const ok = values.filter(v => typeof v === "number").length;
+			this._codesSourceState = { ok, failed: values.length - ok, total: values.length };
 			this._codesCache = codes;
 			return codes;
 		}
 		catch (e) {
 			console.error(`${this.fullName}:fetchCodes`, `Error: ${e?.message || e}`);
 			logNotification("error", this.fullName, `Failed to fetch promo codes: ${e?.message || e}`, buffer);
+			this._codesSourceState = { ok: 0, failed: CODE_SOURCE_ORDER.length, total: CODE_SOURCE_ORDER.length };
 			this._codesCache = [];
 			return [];
 		}
@@ -1717,6 +1738,25 @@ function loggableSuccess (success) {
 	};
 }
 
+// Public entry points must not hand back credentials. Apps Script API
+// executables return a function's value in `ExecutionResponse.result`, and a
+// user logging the result would print the cookie again — the same leak we
+// closed for console.* , just via the return value. Redemption uses the
+// internal copy of the account; callers get metadata only.
+function publicAccount (account) {
+	if (!account) return account;
+	const copy = Object.assign({}, account);
+	delete copy.cookie;
+	return copy;
+}
+
+function publicSuccess (success) {
+	if (!success) return success;
+	const copy = Object.assign({}, success);
+	copy.account = publicAccount(success.account);
+	return copy;
+}
+
 function checkInGame (gameName) {
 	// Read cookies once: PropertiesService is a paid store — every extra read
 	// is a wasted round-trip, and both the Game constructor and the
@@ -1732,14 +1772,18 @@ function checkInGame (gameName) {
 	return game.checkAndExecute(buffer)
 		.then(async (successes) => {
 			console.log(`Successful check-ins for ${gameName}:`, successes.map(loggableSuccess));
+			// Strip the cookie once, up front: every branch below returns
+			// `publicSuccesses`, while `success.account` (with the cookie) is
+			// only used for the redemption calls in this scope.
+			const publicSuccesses = successes.map(publicSuccess);
 
 			if (!config.enableCodeRedemption) {
 				console.log(`Code redemption is disabled in config for ${gameName}`);
-				return { successes, buffer };
+				return { successes: publicSuccesses, buffer };
 			}
 
 			if (gameName === "honkai") {
-				return { successes, buffer };
+				return { successes: publicSuccesses, buffer };
 			}
 
 			// If no new sign-ins happened, codes are NOT re-checked (this is
@@ -1750,14 +1794,14 @@ function checkInGame (gameName) {
 				if (hasAccounts) {
 					logNotification("info", gameName, "No new check-ins; promo codes not re-checked (run manuallyRedeemCodes() to force)", buffer);
 				}
-				return { successes, buffer };
+				return { successes: publicSuccesses, buffer };
 			}
 
 			for (const success of successes) {
 				await game.redeemCodes(success.account, buffer);
 			}
 
-			return { successes, buffer };
+			return { successes: publicSuccesses, buffer };
 		})
 		.catch((e) => {
 			console.error(`An error occurred during ${gameName} check-in:`, e);
@@ -1839,7 +1883,9 @@ function checkInAllGames () {
 
 			console.log("All games checked in successfully");
 			flushDiscordNotifications();
-			return results.flatMap(r => r.value ? r.value.successes : []);
+			// `.map(publicSuccess)` is a no-op for already-sanitised entries
+			// but guarantees the public return path never carries a cookie.
+			return results.flatMap(r => r.value ? r.value.successes : []).map(publicSuccess);
 		})
 		.finally(() => lock.releaseLock());
 }
@@ -1925,11 +1971,11 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 
 			if (forceRedeem) {
 				await game.forceRedeemCodes(account);
-				return { success: true, account, message: `Force redeemed all codes for ${account.nickname} (${account.uid})` };
+				return { success: true, account: publicAccount(account), message: `Force redeemed all codes for ${account.nickname} (${account.uid})` };
 			}
 			else {
 				await game.redeemCodes(account);
-				return { success: true, account, message: `Redeemed new codes for ${account.nickname} (${account.uid})` };
+				return { success: true, account: publicAccount(account), message: `Redeemed new codes for ${account.nickname} (${account.uid})` };
 			}
 		}
 		catch (e) {

@@ -1265,6 +1265,62 @@ function load (overrides = {}) {
 		assert.strictEqual(after, before, "no second attempt for the exhausted code");
 	});
 
+	// 49. Public entry points must not hand back credentials: an Apps Script
+	// API executable returns a function's value in ExecutionResponse.result,
+	// and a user logging the result would print the cookie again.
+	await t("public entry points return no cookie while redemption still works", async () => {
+		const RET_COOKIE = "ltuid_v2=12345678; ltoken_v2=RETLEAK99; cookie_token_v2=RETLEAK99";
+		const api = load();
+		api.config.genshin.data = [RET_COOKIE];
+		const out = JSON.stringify(await api.checkInAllGames());
+		assert.ok(!out.includes("RETLEAK99"), "checkInAllGames return carries no token");
+		assert.ok(!/"(cookie|ltoken)/.test(out), "no cookie fields in checkInAllGames return");
+		assert.ok(out.includes("800000001"), "account metadata still returned");
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
+		assert.ok(stored.includes("TESTCODE1"), "redemption still used the internal cookie");
+		const manual = JSON.stringify(await api.manuallyRedeemCodes("genshin", false));
+		assert.ok(!manual.includes("RETLEAK99"), "manuallyRedeemCodes return carries no token");
+		assert.ok(!/"(cookie|ltoken)/.test(manual), "no cookie fields in manual return");
+	});
+
+	// 50. A code-source outage must not be reported as "no active codes".
+	await t("all code sources failing is reported as unreachable", async () => {
+		const api = load({
+			"api.ennead.cc": () => { throw new Error("ennead down"); },
+			"raw.githubusercontent.com": () => { throw new Error("hum-bao down"); }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(/unreachable/i.test(msg), "report says sources are unreachable");
+		assert.ok(!/no active promo codes/i.test(msg), "does not claim there are no codes");
+	});
+
+	// 51. One source down, the other empty -> the list may be incomplete.
+	await t("partial source failure marks an empty code list as incomplete", async () => {
+		const api = load({
+			"api.ennead.cc": () => { throw new Error("ennead down"); },
+			"raw.githubusercontent.com": ""
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(/incomplete/i.test(msg), "incomplete warning present");
+		assert.ok(!/unreachable/i.test(msg), "not the all-failed message");
+	});
+
+	// 52. One source down, the other returns codes -> still redeem, still warn.
+	await t("partial source failure redeems surviving codes and flags the gap", async () => {
+		const api = load({
+			"api.ennead.cc": () => { throw new Error("ennead down"); }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("TESTCODE2"), "code from the surviving source redeemed");
+		assert.ok(/incomplete/i.test(msg), "incomplete warning present");
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();
