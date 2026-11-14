@@ -38,8 +38,8 @@ At the top of the file you'll see a `config` object. Put your cookie strings int
 
 ```javascript
 const config = {
-    enableCodeRedemption: false,      // turn on later (step 4)
-    redeemCodesEvenIfSignedIn: false, // optional, see step 4
+    enableCodeRedemption: true,       // on by default; set false for check-ins only
+    redeemCodesEvenIfSignedIn: true,  // also redeem for accounts already signed in today
     redeemSleepMs: 6000,              // pause between code redemptions (rate-limit guard)
     genshin:  { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
     honkai:   { data: [ /* "ltoken_v2=…; ltuid_v2=…;", */ ] },
@@ -91,13 +91,13 @@ Promo codes are **grouped per account** (one line for new claims + one compact s
 
 > 🔒 **Prefer keeping secrets out of the file?** You can store cookies and the webhook in Apps Script **Script Properties** instead — see [Configuration reference](#storing-secrets-in-script-properties).
 
-### 4. (Optional) Enable code redemption
+### 4. (Optional) Tune code redemption
 
-Once basic check-in works for a day or two, set `enableCodeRedemption: true`. Now the script also redeems active promo codes for every account that just signed in.
+Code redemption is **on by default**. If you only want check-ins and no promo-code requests, set `enableCodeRedemption: false`.
 
 Already-redeemed codes are remembered in `PropertiesService`, so they won't be claimed twice.
 
-**Want codes checked even for already-signed-in accounts?** Set `redeemCodesEvenIfSignedIn: true` — useful if you run twice a day or a limited code drops after the morning check-in.
+**Codes are also checked for accounts that were already signed in today** (`redeemCodesEvenIfSignedIn: true`, default) — useful if you run twice a day or a limited code drops after the morning check-in. Set it to `false` to redeem only for accounts that just signed in (upstream behaviour).
 
 **Force a one-off redemption** from the toolbar (e.g. the API missed a fresh code):
 
@@ -152,8 +152,8 @@ If you set a webhook, the Discord report arrives within seconds.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `enableCodeRedemption` | `false` | Redeem active promo codes for accounts that just signed in |
-| `redeemCodesEvenIfSignedIn` | `false` | Also redeem codes for accounts already signed in today |
+| `enableCodeRedemption` | `true` | Redeem active promo codes automatically; `false` = check-ins only |
+| `redeemCodesEvenIfSignedIn` | `true` | Also redeem codes for accounts already signed in today; `false` = only for accounts that just signed in |
 | `redeemSleepMs` | `6000` | Pause (ms) between code redemptions — rate-limit guard; hard floor 2000 ms enforced |
 | `maxExecutionTimeMs` | `300000` | Hard cap on total runtime (ms) so the run finishes before the GAS 6-minute limit; `0` stops immediately (tests) |
 
@@ -177,7 +177,7 @@ Active promo codes are pulled from **three** community aggregators and merged (d
 
 - [api.ennead.cc](https://api.ennead.cc/mihoyo/genshin/codes) — torikushiii's JSON aggregator
 - [Hum-Bao/hoyoverse-codes](https://github.com/Hum-Bao/hoyoverse-codes) — GitHub-hosted txt files, updated daily (lists are US-validated)
-- [seriaati/hoyo-codes](https://github.com/seriaati/hoyo-codes) — JSON API at `hoyo-codes.seria.moe`, refreshed hourly from GamesRadar, Pocket Tactics, Prydwen, Fandom and HoYoLAB. Its hosted validator runs on an **Asia** account, so an "OK" code can still be region-locked for you — the script treats it as a hint and lets the actual redemption result decide (a `-2017` rejection lands in the per-account blocklist as usual).
+- [seriaati/hoyo-codes](https://github.com/seriaati/hoyo-codes) — JSON API at `hoyo-codes.seria.moe`, refreshed hourly from GamesRadar, Pocket Tactics, Prydwen, Fandom and HoYoLAB. Its hosted validator runs on an **Asia** account, so an "OK" code can still be region-locked for you — the script treats it as a hint and lets the actual redemption result decide: an already-used code (`-2017`/`-2018`) goes into the per-account redeemed list, and only a region/platform rejection lands in the separate blocklist.
 
 Running all three means a single outage doesn't block redemption. (Note: in GAS the fetches run sequentially — `UrlFetchApp.fetch` blocks the event loop — so the extra sources are fallbacks, not real parallelism.) If one source fails, the codes from the surviving sources are still redeemed and the report adds a *"list may be incomplete"* note; if all fail, the report says the sources are unreachable instead of claiming there are no active codes. To add a fourth source, append an entry to `CODE_SOURCES` and to `CODE_SOURCE_ORDER` in `index.js`.
 
@@ -240,7 +240,7 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | **"Cookie is missing ltoken/ltoken_v2"** | Same fix — the cookie is partial; re-grab it the same way. |
 | **`Error: undefined`** | The underlying error had no `.message`. The function name in the surrounding text tells you which API call failed; full error is in **Executions**. |
 | **"cookie expired — grab a fresh one"** | Cookie expired (`-1071`/`-100`/`-10001`). The script stops that account's codes and reports once. Re-grab the cookie. |
-| **Already signed in, but codes not claimed** | Default: codes only redeem for accounts that *just* signed in. Set `redeemCodesEvenIfSignedIn: true`, or force once with `redeemGenshinCodes(true)` etc. |
+| **Already signed in, but codes not claimed** | Check `enableCodeRedemption` and `redeemCodesEvenIfSignedIn` (both default `true`). If you set the latter to `false`, codes only redeem for accounts that *just* signed in — force once with `redeemGenshinCodes(true)` etc. |
 | **"Unknown region" for a whole account** | Your account is on a server the script doesn't recognise yet. The account is skipped with a single error line; no codes are attempted. Report the region name in an issue so it can be mapped. |
 
 ---

@@ -1,9 +1,9 @@
 const config = {
-	enableCodeRedemption: false, // Set to true to enable automatic code redemption
-	// If true, promo codes are checked for ALL accounts on every run, even
-	// those that were already signed in today. If false (default), codes are
-	// only redeemed for accounts that just signed in (upstream behaviour).
-	redeemCodesEvenIfSignedIn: false,
+	enableCodeRedemption: true, // Redeem active promo codes automatically (set false for check-ins only)
+	// If true (default), promo codes are checked for ALL accounts on every run,
+	// even those that were already signed in today. Set false to redeem only
+	// for accounts that just signed in (upstream behaviour).
+	redeemCodesEvenIfSignedIn: true,
 	// Pause between individual redemption requests. This is NOT a pacing knob
 	// for "how many accounts" — it's the throttle that keeps you under HoYoLAB's
 	// rate limit on the cdkey endpoint (there is no published threshold, but a
@@ -279,8 +279,9 @@ const CODE_SOURCES = {
 		// Third source. Its hosted validator runs on an ASIA account, so an
 		// "OK" here is a hint, not a verdict: a code marked OK may still be
 		// region-locked for this account. Our own redemption result stays the
-		// source of truth (-2017 → permanent blocklist), so nothing extra is
-		// needed to stay correct.
+		// source of truth — an already-used code (-2017/-2018) is recorded in
+		// the per-account redeemed list and never retried, while only a
+		// region/platform rejection lands in the separate blocklist.
 		name: "seriaati/hoyo-codes (hoyo-codes.seria.moe)",
 		urlFor: gameParam => {
 			const gameId = { genshin: "genshin", starrail: "hkrpg", zenless: "nap" }[gameParam];

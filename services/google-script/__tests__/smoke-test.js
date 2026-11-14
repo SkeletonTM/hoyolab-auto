@@ -182,9 +182,8 @@ function load (overrides = {}) {
 	responseMap = ordered;
 	const sandbox = makeSandbox();
 	vm.createContext(sandbox);
+	// enableCodeRedemption defaults to true, so tests no longer patch it.
 	const src = fs.readFileSync(__dirname + "/../index.js", "utf8")
-		// activate the config for tests
-		.replace("enableCodeRedemption: false", "enableCodeRedemption: true")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
 		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders };", sandbox);
 	return sandbox.__api;
@@ -276,9 +275,10 @@ function load (overrides = {}) {
 		assert.ok(msg.includes("missing ltuid"), "explicit cookie error in report");
 	});
 
-	// 5. already signed -> skip line; codes NOT auto-redeemed (default)
-	await t("already-signed account skips check-in and skips codes by default", async () => {
+	// 5. with redeemCodesEvenIfSignedIn off -> skip line, codes NOT redeemed
+	await t("already-signed account with redeemCodesEvenIfSignedIn off skips codes", async () => {
 		const api = load({ "/info?act_id": SIGN_INFO_SIGNED });
+		api.config.redeemCodesEvenIfSignedIn = false;
 		api.config.genshin.data = [COOKIE];
 		await api.checkInAllGames();
 		const msg = postedToDiscord[0];
@@ -391,7 +391,6 @@ function load (overrides = {}) {
 		const sandbox = makeSandbox();
 		vm2.createContext(sandbox);
 		let code = fs2.readFileSync(__dirname + "/../index.js", "utf8")
-			.replace("enableCodeRedemption: false", "enableCodeRedemption: true")
 			.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
 		vm2.runInContext(code, sandbox);
 		let rejected = false;
@@ -1358,6 +1357,14 @@ function load (overrides = {}) {
 		const msg = postedToDiscord[0] || "";
 		assert.ok(msg.includes("+3 new"), `three unique codes claimed (got: ${msg.split("\n")[0]})`);
 		assert.strictEqual((msg.match(/TESTCODE1/g) || []).length, 1, "TESTCODE1 appears once, not per source");
+	});
+
+	// 55. Defaults are part of the contract: redemption and signed-in
+	// redemption are ON unless the user turns them off.
+	await t("config defaults: both redemption flags default to true", () => {
+		const api = load();
+		assert.strictEqual(api.config.enableCodeRedemption, true, "enableCodeRedemption defaults to true");
+		assert.strictEqual(api.config.redeemCodesEvenIfSignedIn, true, "redeemCodesEvenIfSignedIn defaults to true");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
