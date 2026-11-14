@@ -274,13 +274,40 @@ const CODE_SOURCES = {
 			.map(line => line.trim())
 			.filter(line => /^[a-zA-Z0-9]{4,}$/i.test(line))
 			.map(code => ({ code }))
+	},
+	seriaati: {
+		// Third source. Its hosted validator runs on an ASIA account, so an
+		// "OK" here is a hint, not a verdict: a code marked OK may still be
+		// region-locked for this account. Our own redemption result stays the
+		// source of truth (-2017 → permanent blocklist), so nothing extra is
+		// needed to stay correct.
+		name: "seriaati/hoyo-codes (hoyo-codes.seria.moe)",
+		urlFor: gameParam => {
+			const gameId = { genshin: "genshin", starrail: "hkrpg", zenless: "nap" }[gameParam];
+			if (!gameId) {
+				throw new Error(`No hoyo-codes game id for game "${gameParam}"`);
+			}
+			return `https://hoyo-codes.seria.moe/codes?game=${gameId}`;
+		},
+		parse: text => {
+			const data = JSON.parse(text);
+			if (!data || !Array.isArray(data.codes)) {
+				throw new Error(`Unexpected payload: ${text.substring(0, 120)}`);
+			}
+			// `rewards` there is free-form prose, and we never print it, so
+			// keep the code only. Non-OK rows are dead/expired codes.
+			return data.codes
+				.filter(entry => entry && entry.code && entry.status === "OK")
+				.map(entry => ({ code: entry.code }));
+		}
 	}
 };
 
 // Order matters in the union: when the same code appears in multiple sources
 // we keep the first entry's metadata (e.g. `rewards` from ennead) and only
-// backfill from later sources if the earlier one was sparse.
-const CODE_SOURCE_ORDER = ["ennead", "humBao"];
+// backfill from later sources if the earlier one was sparse. seriaati goes
+// last: it only carries the code itself, no rewards.
+const CODE_SOURCE_ORDER = ["ennead", "humBao", "seriaati"];
 
 async function fetchFromSource (source, gameParam) {
 	const url = source.urlFor(gameParam);

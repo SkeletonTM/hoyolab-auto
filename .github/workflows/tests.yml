@@ -1,0 +1,30 @@
+name: tests
+
+# Runs the Apps Script smoke-test harness on every push to main and every PR,
+# so "all tests pass" is a checkable fact on the commit instead of a claim.
+# No secrets are used: the harness stubs UrlFetchApp/PropertiesService, so no
+# live HoYoLAB or Discord request ever leaves CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The harness has no dependencies, so there is nothing to install.
+      - name: Run smoke tests
+        run: npm test

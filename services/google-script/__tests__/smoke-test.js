@@ -166,6 +166,9 @@ function load (overrides = {}) {
 		"/sign": SIGN_OK,
 		"api.ennead.cc": ENNEAD,
 		"raw.githubusercontent.com": HUMBAO,
+		// seriaati/hoyo-codes answers with an empty list by default so existing
+		// scenarios see no extra codes; tests that exercise it override this.
+		"hoyo-codes.seria.moe": { codes: [] },
 		"webExchangeCdkey": REDEEM_OK,
 		"webExchangeCdkeyRisk": REDEEM_OK
 	};
@@ -1287,7 +1290,8 @@ function load (overrides = {}) {
 	await t("all code sources failing is reported as unreachable", async () => {
 		const api = load({
 			"api.ennead.cc": () => { throw new Error("ennead down"); },
-			"raw.githubusercontent.com": () => { throw new Error("hum-bao down"); }
+			"raw.githubusercontent.com": () => { throw new Error("hum-bao down"); },
+			"hoyo-codes.seria.moe": () => { throw new Error("seriaati down"); }
 		});
 		api.config.genshin.data = [COOKIE];
 		await api.checkInAllGames();
@@ -1319,6 +1323,41 @@ function load (overrides = {}) {
 		const msg = postedToDiscord[0] || "";
 		assert.ok(msg.includes("TESTCODE2"), "code from the surviving source redeemed");
 		assert.ok(/incomplete/i.test(msg), "incomplete warning present");
+	});
+
+	// 53. Third source: seriaati/hoyo-codes (Asia-validated JSON API).
+	// It must contribute codes the other sources do not have, and its
+	// non-OK entries must never be attempted.
+	await t("seriaati source contributes new codes and skips non-OK entries", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [] },
+			"raw.githubusercontent.com": "",
+			"hoyo-codes.seria.moe": {
+				codes: [
+					{ code: "SERIAONLY1", status: "OK" },
+					{ code: "SERIADEAD1", status: "EXPIRED" }
+				]
+			}
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("SERIAONLY1"), "new code from the third source redeemed");
+		assert.ok(!msg.includes("SERIADEAD1"), "EXPIRED entry never attempted or reported");
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"] || "[]");
+		assert.deepStrictEqual(stored.sort(), ["SERIAONLY1"], "only the OK code persisted");
+	});
+
+	// 54. The third source must not break the happy path when all three agree.
+	await t("all three sources together stay deduplicated", async () => {
+		const api = load({
+			"hoyo-codes.seria.moe": { codes: [{ code: "TESTCODE1", status: "OK" }, { code: "DUPEONLY", status: "OK" }] }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const msg = postedToDiscord[0] || "";
+		assert.ok(msg.includes("+3 new"), `three unique codes claimed (got: ${msg.split("\n")[0]})`);
+		assert.strictEqual((msg.match(/TESTCODE1/g) || []).length, 1, "TESTCODE1 appears once, not per source");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
