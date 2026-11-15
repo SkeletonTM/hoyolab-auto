@@ -82,9 +82,15 @@ function makeSandbox () {
 			newTrigger: (handler) => ({
 				timeBased: () => ({
 					everyDays: (n) => ({
-						atHour: (h) => ({
-							create: () => { triggerLog.push({ action: "create", handler, hour: h, everyDays: n }); }
-						})
+						atHour: (h) => {
+							const entry = { action: "create", handler, hour: h, everyDays: n };
+							const builder = {
+								// Optional timezone, mirroring ClockTriggerBuilder.inTimezone().
+								inTimezone: (tz) => { entry.timezone = tz; return builder; },
+								create: () => { triggerLog.push(entry); }
+							};
+							return builder;
+						}
 					})
 				})
 			}),
@@ -125,7 +131,7 @@ function makeSandbox () {
 		UrlFetchApp: {
 			fetch: (url, opts = {}) => {
 				fetchLog.push(url);
-				fetchOptsLog.push({ url, mute: opts.muteHttpExceptions === true });
+				fetchOptsLog.push({ url, mute: opts.muteHttpExceptions === true, timeoutSeconds: opts.timeoutSeconds });
 				if (opts && opts.headers) headerLog.push(opts.headers);
 				if (url.includes("/sign") && opts && opts.method === "POST") signBodies.push(opts.payload || "");
 				for (const [pattern, responder] of Object.entries(responseMap)) {
@@ -1509,6 +1515,44 @@ function load (overrides = {}) {
 		const after = Object.keys(properties).filter(k => /^COOKIE_genshin_\d+$/.test(k)).sort();
 		assert.deepStrictEqual(after, ["COOKIE_genshin_1"], "only the current chunk remains");
 		assert.deepStrictEqual(api.getCookies("genshin"), ["ltuid_v2=1; cookie_token_v2=2"]);
+	});
+
+	// 64. UrlFetchApp waits 360s per request by default, which can swallow the
+	// whole execution budget before the Discord report is sent.
+	await t("every outbound request carries a bounded timeout", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const unbounded = fetchOptsLog.filter(o => typeof o.timeoutSeconds !== "number" || o.timeoutSeconds <= 0 || o.timeoutSeconds > 120);
+		assert.deepStrictEqual(unbounded.map(o => o.url), [], "all fetches are bounded");
+	});
+
+	// 65. Manual redemption starts every account at once on one Game instance;
+	// caching only the finished result let each account re-fetch all sources.
+	await t("manual multi-account redemption fetches each source once", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE, "ltuid_v2=87654321; ltoken_v2=abc; other=1"];
+		await api.manuallyRedeemCodes("genshin");
+		const hits = fetchLog.filter(u => u.includes("api.ennead.cc")).length;
+		assert.strictEqual(hits, 1, `ennead fetched ${hits} time(s)`);
+	});
+
+	// 66. A run with only warnings is not a calm, fully-successful day.
+	await t("warning-only report does not use the quiet mood", async () => {
+		const api = load();
+		const warned = api.juFufuContextualLines(["⏭️ [Genshin Impact] A: Already signed in today", "⚠️ [Genshin Impact] A: 2 in cooldown — retried next run"]);
+		assert.notStrictEqual(warned.mood, "quiet", "warnings are not quiet");
+		const skipped = api.juFufuContextualLines(["⏭️ [Genshin Impact] A: Already signed in today"]);
+		assert.strictEqual(skipped.mood, "quiet", "pure skips stay quiet");
+	});
+
+	// 67. atHour() runs in the project timezone; the helper must be able to set one.
+	await t("createDailyTrigger can pin a timezone", async () => {
+		const api = load();
+		api.createDailyTrigger(6, "Asia/Almaty");
+		const created = triggerLog.filter(t => t.action === "create").pop();
+		assert.strictEqual(created.hour, 6);
+		assert.strictEqual(created.timezone, "Asia/Almaty");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

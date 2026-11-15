@@ -151,6 +151,11 @@ function writeCookieProperty (game, cookies) {
 	props.deleteProperty(`COOKIE_${game}`);
 }
 
+function fetchWithTimeout (url, options) {
+	const opts = Object.assign({}, options || {}, { timeoutSeconds: REQUEST_TIMEOUT_SECONDS });
+	return UrlFetchApp.fetch(url, opts);
+}
+
 function getCookies (game) {
 	const stored = readCookieProperty(game);
 	if (stored) {
@@ -385,7 +390,7 @@ const CODE_SOURCE_ORDER = ["ennead", "humBao", "seriaati"];
 
 async function fetchFromSource (source, gameParam) {
 	const url = source.urlFor(gameParam);
-	const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+	const response = fetchWithTimeout(url, { muteHttpExceptions: true });
 	const code = response.getResponseCode();
 	if (code !== 200) {
 		throw new Error(`HTTP ${code}`);
@@ -440,6 +445,12 @@ const SCRIPT_START_TIME = Date.now();
 // Seconds kept free at the end of a run so the Discord report still goes out
 // before Apps Script's hard 6-minute cutoff kills the execution.
 const EXECUTION_RESERVE_MS = 60000;
+
+// UrlFetchApp waits up to 360 seconds per request unless told otherwise, so a
+// single stalled connection can outlive the whole execution budget and leave
+// no time for the Discord report. Every outbound call goes through
+// fetchWithTimeout() with this bound instead.
+const REQUEST_TIMEOUT_SECONDS = 30;
 
 function outOfTimeBudget () {
 	const limit = typeof config.maxExecutionTimeMs === "number" ? config.maxExecutionTimeMs : 300000;
@@ -557,9 +568,13 @@ function juFufuContextualLines (lines) {
 	const hasErrors = lines.some(line => line.includes("❌"));
 	const hasNewCodes = lines.some(line => line.includes("🎁"));
 	const hasCheckins = lines.some(line => line.includes("✅"));
+	// Warnings (⚠️) and blocked codes (🚫) mean something needs a look even
+	// when nothing failed outright — that is not a calm "all done" day.
+	const hasAttention = lines.some(line => line.includes("⚠️") || line.includes("🚫"));
 	let mood = "ok";
 	if (hasErrors) mood = "errors";
 	else if (hasNewCodes) mood = "codes";
+	else if (hasAttention) mood = "ok";
 	else if (!hasCheckins) mood = "quiet";
 	return { intro: juFufuPick(JU_FUFU.intro[mood]), outro: juFufuPick(JU_FUFU.outro[mood]), mood };
 }
@@ -699,7 +714,7 @@ function flushDiscordNotifications () {
 				payload: JSON.stringify({ content, allowed_mentions: allowedMentions }),
 				muteHttpExceptions: true
 			};
-			let discordRes = UrlFetchApp.fetch(webhook, postOptions);
+			let discordRes = fetchWithTimeout(webhook, postOptions);
 			let code = discordRes.getResponseCode();
 
 			// Discord rate-limited us. It always answers 429 with retry_after
@@ -715,7 +730,7 @@ function flushDiscordNotifications () {
 				if (retryAfter > 0) {
 					Utilities.sleep(Math.min(retryAfter * 1000, 15000)); // cap at 15s
 				}
-				discordRes = UrlFetchApp.fetch(webhook, postOptions);
+				discordRes = fetchWithTimeout(webhook, postOptions);
 				code = discordRes.getResponseCode();
 			}
 
@@ -808,7 +823,8 @@ class Game {
 		this.fullName = DEFAULT_CONSTANTS[name].game; // Get full name from constants
 		this.config = { ...DEFAULT_CONSTANTS[name] };
 		this.data = config.data || [];
-		this._codesCache = null; // Per-run cache for fetchCodes()
+		this._codesCache = null;   // finished fetchCodes() result
+		this._codesPromise = null; // in-flight fetchCodes() call, shared by accounts
 		this._codesSourceState = null; // { ok, failed, total } for the last fetch
 
 		if (this.data.length === 0) {
@@ -1000,7 +1016,7 @@ class Game {
 					};
 
 					const url = `https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard?uid=${ltuid}`;
-					const response = await UrlFetchApp.fetch(url, options);
+					const response = await fetchWithTimeout(url, options);
 					const g = guardResponse(response);
 					if (g.transient) {
 						throw new Error(`HoYoLAB server unavailable (HTTP ${g.status}) — try again later`);
@@ -1068,7 +1084,7 @@ class Game {
 				payload: JSON.stringify(payload)
 			};
 
-			const response = UrlFetchApp.fetch(this.config.url.sign, options);
+			const response = fetchWithTimeout(this.config.url.sign, options);
 			const g = guardResponse(response);
 			if (g.transient) {
 				console.error(`${this.fullName}:sign`, `HTTP ${g.status} — server unavailable, retry later`);
@@ -1129,7 +1145,7 @@ class Game {
 	async getSignInfo (cookieData) {
 		try {
 			const url = `${this.config.url.info}?act_id=${this.config.ACT_ID}`;
-			const response = await UrlFetchApp.fetch(url, {
+			const response = await fetchWithTimeout(url, {
 				muteHttpExceptions: true,
 				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
@@ -1181,7 +1197,7 @@ class Game {
 	async getAwardsData (cookieData) {
 		try {
 			const url = `${this.config.url.home}?act_id=${this.config.ACT_ID}`;
-			const response = await UrlFetchApp.fetch(url, {
+			const response = await fetchWithTimeout(url, {
 				muteHttpExceptions: true,
 				headers: browserHeaders(cookieData, {
 					"x-rpc-signgame": this.getSignGameHeader()
@@ -1517,9 +1533,17 @@ class Game {
 	}
 
 	async fetchCodes (buffer) {
-		// Cache even an empty result: if every source returned 0 codes (or the
-		// fetch failed and this layer already logged it), there is no
-		// point re-hitting the same URLs for every account of this game.
+		// Cache the in-flight PROMISE, not just the finished result: manual
+		// redemption starts every account at once, so with a value-only cache
+		// each account would see an empty cache and fetch all three sources
+		// again. An empty result is cached just the same - if every source
+		// returned 0 codes there is no point re-hitting them per account.
+		if (this._codesPromise) return this._codesPromise;
+		this._codesPromise = this._fetchCodesOnce(buffer);
+		return this._codesPromise;
+	}
+
+	async _fetchCodesOnce (buffer) {
 		if (this._codesCache) return this._codesCache;
 
 		const gameParam = this.getGameParam();
@@ -1564,7 +1588,7 @@ class Game {
 				headers: browserHeaders(account.cookie)
 			};
 
-			const response = await UrlFetchApp.fetch(url, options);
+			const response = await fetchWithTimeout(url, options);
 			const g = guardResponse(response);
 			if (g.transient) {
 				console.error(`Code ${code} redemption skipped for ${this.fullName}: HTTP ${g.status} — server unavailable, retry later`);
@@ -1988,12 +2012,18 @@ function checkInGame (gameName) {
 // (so re-running the helper can't stack duplicates) and installs a single
 // time-driven trigger at the given hour. Call this from the Apps Script
 // editor (or an onOpen custom menu) instead of clicking through Triggers UI.
-function createDailyTrigger (hour = 8) {
+function createDailyTrigger (hour = 8, timezone) {
 	// Fail fast: ScriptApp.atHour() throws an opaque error for out-of-range
 	// hours and leaves the caller with no trigger at all — a clear message
 	// beats a broken schedule.
 	if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
 		throw new Error(`createDailyTrigger: hour must be an integer 0-23, got ${hour}`);
+	}
+	// atHour() follows the PROJECT timezone. Pass an IANA name to pin it
+	// explicitly (e.g. createDailyTrigger(5, "Asia/Almaty")) when the project
+	// setting is not the timezone you scheduled around.
+	if (timezone !== undefined && (typeof timezone !== "string" || timezone.trim() === "")) {
+		throw new Error(`createDailyTrigger: timezone must be an IANA name like "Asia/Almaty", got ${timezone}`);
 	}
 	const target = "checkInAllGames";
 	ScriptApp.getProjectTriggers().forEach(trigger => {
@@ -2001,12 +2031,13 @@ function createDailyTrigger (hour = 8) {
 			ScriptApp.deleteTrigger(trigger);
 		}
 	});
-	ScriptApp.newTrigger(target)
+	const builder = ScriptApp.newTrigger(target)
 		.timeBased()
 		.everyDays(1)
-		.atHour(hour)
-		.create();
-	console.log(`createDailyTrigger: daily ${target} trigger set for ${hour}:00`);
+		.atHour(hour);
+	if (timezone) builder.inTimezone(timezone);
+	builder.create();
+	console.log(`createDailyTrigger: daily ${target} trigger set for ${hour}:00${timezone ? ` ${timezone}` : ""}`);
 }
 
 // NOTE on async entry points: GAS triggers do NOT await the returned Promise.

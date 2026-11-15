@@ -124,6 +124,8 @@ Already-redeemed codes are remembered in `PropertiesService`, so they won't be c
 
 **One-click alternative:** run `createDailyTrigger()` from the editor — it removes existing `checkInAllGames` triggers and installs one daily trigger in the 08:00 hour (pass an integer 0-23 to override, e.g. `createDailyTrigger(6)`; anything else throws). `atHour(8)` means somewhere inside that hour, not exactly 08:00.
 
+> 🕐 **Timezone:** `atHour()` uses the **project** timezone (Apps Script → Project Settings → Time zone), not your machine or the table below. Set the project zone, or pin it in code: `createDailyTrigger(5, "Asia/Almaty")` passes the hour through `.inTimezone()`.
+
 ### 6. Run it once manually
 
 Click ▶ **Run** with `checkInAllGames` selected. Accept the authorisation dialog. Open the **Executions** tab to see logs and errors.
@@ -225,6 +227,8 @@ All four games reset their daily check-in at the same wall-clock moment: **04:00
 
 > 🕐 During northern-hemisphere summer (US/EU DST): NA → **08:00 UTC**, EU → **02:00 UTC**. SEA/TW unaffected.
 
+> ⚠️ These times are UTC. Apps Script triggers fire in the **project timezone** — convert the target time or make the timezone explicit with `createDailyTrigger(hour, "Asia/Almaty")`.
+
 **Picking a trigger time — the easy rule:**
 
 Schedule for **05:00 server time** in your region (or the latest region, if you have several). In UTC: **NA only** → 09:30 UTC (08:30 summer); **EU only** → 03:30 UTC (02:30 summer); **SEA/TW only** → 20:30 UTC. Or schedule for NA's reset (`09:30 UTC` winter / `08:30 UTC` summer) to cover everything.
@@ -277,4 +281,4 @@ npm test
 node services/google-script/__tests__/smoke-test.js
 ```
 
-95 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget, chunked cookie storage, legacy-key migration, and the Discord report format.
+102 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget, bounded request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, legacy-key migration, and the Discord report format.
