@@ -12,8 +12,10 @@ const config = {
 	redeemSleepMs: 6000,
 	// Hard cap on total runtime (ms) so the run finishes before Google kills
 	// the script at the GAS 6-minute execution limit for free accounts.
-	// When exceeded, the redemption loops stop early and the Discord report
-	// still gets flushed. Set to 0 to stop immediately (useful in tests).
+	// When exceeded, the loops stop early and one minute is kept for the
+	// Discord flush. That flush still needs a usable window: the report is
+	// posted only if ~2s remain at run start, so very small values (0, 1000)
+	// stop everything and send nothing.
 	maxExecutionTimeMs: 300000,
 	genshin: {
 		data: [
@@ -788,8 +790,13 @@ function flushDiscordNotifications () {
 				let retryAfter = null;
 				try {
 					const parsed = JSON.parse(discordRes.getContentText());
-					const value = Number(parsed.retry_after);
-					if (Number.isFinite(value) && value >= 0) retryAfter = value;
+					// Type-check instead of coercing: Number(null), Number(false)
+					// and Number("") are all 0, which would turn a malformed body
+					// into a valid zero-second interval and retry immediately.
+					if (typeof parsed.retry_after === "number" &&
+						Number.isFinite(parsed.retry_after) && parsed.retry_after >= 0) {
+						retryAfter = parsed.retry_after;
+					}
 				}
 				catch (e) { /* handled below: no usable interval */ }
 				// No usable retry_after means we cannot know when the bucket

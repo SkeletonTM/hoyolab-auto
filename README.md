@@ -281,4 +281,4 @@ npm test
 node services/google-script/__tests__/smoke-test.js
 ```
 
-117 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget with budget-aware request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, trigger timezone handling, legacy-key migration, and the Discord report format.
+118 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget with budget-aware request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, trigger timezone handling, legacy-key migration, and the Discord report format.

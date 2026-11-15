@@ -1779,6 +1779,20 @@ function load (overrides = {}) {
 		assert.ok(consoleLog.join("\n").includes("429 again after waiting"), "second 429 is reported");
 	});
 
+	// 83. `null`, `false` and `""` are not intervals: Number() would turn them
+	// into 0 and retry immediately, so the type is checked instead.
+	await t("non-numeric retry_after values are not treated as zero", async () => {
+		for (const bad of [null, false, "", "3", {}]) {
+			const api = load();
+			properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+			api.config.maxExecutionTimeMs = 300000;
+			discordResponder = () => ({ getResponseCode: () => 429, getContentText: () => JSON.stringify({ retry_after: bad }) });
+			await api.checkInAllGames();
+			assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 1,
+				`retry_after ${JSON.stringify(bad)} must not be retried`);
+		}
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();
