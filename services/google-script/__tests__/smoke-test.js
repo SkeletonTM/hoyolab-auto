@@ -980,7 +980,7 @@ function load (overrides = {}) {
 	// 33. GAS 6-minute limit guard: redemption loop stops early with a warning
 	await t("redeemCodes stops early when maxExecutionTimeMs is exceeded", async () => {
 		const api = load();
-		api.config.maxExecutionTimeMs = 0; // already over budget -> stop before any redeem
+		api.config.maxExecutionTimeMs = 61500; // inside the 60s reserve -> stop before any redeem
 		api.config.genshin.data = [COOKIE];
 		await api.manuallyRedeemCodes("genshin", false);
 		const cdkeyHits = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
@@ -994,7 +994,7 @@ function load (overrides = {}) {
 	// BEFORE the redemption loop ever starts.
 	await t("checkAndExecute stops account loop when maxExecutionTimeMs is exceeded", async () => {
 		const api = load();
-		api.config.maxExecutionTimeMs = 0; // already over budget
+		api.config.maxExecutionTimeMs = 61500; // inside the 60s reserve
 		api.config.genshin.data = [COOKIE];
 		await api.checkInAllGames();
 		const signHits = fetchLog.filter(u => u.includes("/sign") || u.includes("/info?")).length;
@@ -1685,6 +1685,73 @@ function load (overrides = {}) {
 		api.flushDiscordNotifications();
 		assert.strictEqual(postedToDiscord.length, 1, "exactly one condensed message");
 		assert.ok(postedToDiscord[0].includes("report truncated"), "truncation is stated in the message");
+	});
+
+	// 76. Discord must never be retried before the interval it asked for: if
+	// retry_after does not fit the window, the chunk is dropped.
+	await t("a 429 retry waits the full retry_after or is dropped", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 10000)); // 10s hard left
+		api.__slow("discord.com");                          // first POST burns 5s
+		discordResponder = () => ({ getResponseCode: () => 429, getContentText: () => JSON.stringify({ retry_after: 20 }) });
+		await api.checkInAllGames();
+		assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 1, "no early retry");
+		assert.deepStrictEqual(sleepCalls.filter(ms => ms >= 20000), [], "never sleeps a capped interval and retries early");
+	});
+
+	// 77. When the requested interval does fit, the full wait is honoured.
+	await t("a 429 retry that fits waits the whole interval, uncapped", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 40000)); // 40s hard left
+		api.__slow("discord.com");
+		let calls = 0;
+		discordResponder = () => (++calls === 1
+			? { getResponseCode: () => 429, getContentText: () => JSON.stringify({ retry_after: 20 }) }
+			: { getResponseCode: () => 204, getContentText: () => "" });
+		await api.checkInAllGames();
+		assert.ok(sleepCalls.includes(20000), `full 20s wait, not a 15s cap: ${sleepCalls}`);
+		assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 2, "one retry after the wait");
+	});
+
+	// 78. A dead webhook (404) must stop the report after one request instead
+	// of repeating the same invalid call for every chunk.
+	await t("a permanent webhook error stops the remaining chunks", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		for (let i = 0; i < 60; i++) api.NOTIFICATIONS.push(`line ${i} ${"x".repeat(120)}`);
+		discordResponder = () => ({ getResponseCode: () => 404, getContentText: () => "Unknown Webhook" });
+		api.flushDiscordNotifications();
+		assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 1, "exactly one request");
+		assert.ok(consoleLog.join("\n").includes("chunk(s) not sent"), "the stop is logged");
+	});
+
+	// 79. Below one viable request window nothing is attempted - neither work
+	// nor a flush POST.
+	await t("a sub-second window starts no request at all", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 1200)); // 1.2s hard left
+		await api.checkInAllGames();
+		assert.strictEqual(fetchLog.filter(u => u.includes("hoyolab")).length, 0, "no work request");
+		assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 0, "no flush POST into a dead window");
+	});
+
+	// 80. Work stops a minimum request window before the reserve: with 0.9s of
+	// work budget left no HoYoLAB request is started at all.
+	await t("work stops before a sub-second request window", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 60900)); // 900ms of work left
+		await api.checkInAllGames();
+		assert.strictEqual(fetchLog.filter(u => u.includes("hoyolab")).length, 0, "no work request below the minimum window");
+		assert.ok(postedToDiscord.length >= 1, "report still flushed inside the reserve");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

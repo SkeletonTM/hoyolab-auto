@@ -475,10 +475,14 @@ const EXECUTION_RESERVE_MS = 60000;
 // no time for the Discord report. Every outbound call goes through
 // fetchWithTimeout() with this bound instead.
 const REQUEST_TIMEOUT_SECONDS = 30;
+// Smallest window worth starting a request in (1s timeout + handling).
+const MIN_REQUEST_WINDOW_MS = 1500;
 
 function outOfTimeBudget () {
 	const limit = typeof config.maxExecutionTimeMs === "number" ? config.maxExecutionTimeMs : 300000;
-	return Date.now() - SCRIPT_START_TIME >= Math.max(limit - EXECUTION_RESERVE_MS, 0);
+	// Stop one minimum request window BEFORE the reserve: otherwise a request
+	// could still start with timeoutSeconds: 1 and spend the report's seconds.
+	return Date.now() - SCRIPT_START_TIME >= Math.max(limit - EXECUTION_RESERVE_MS - MIN_REQUEST_WINDOW_MS, 0);
 }
 
 // Retcodes from the cdkey redemption API, mapped from the upstream
@@ -755,6 +759,13 @@ function flushDiscordNotifications () {
 			content = `<@${discordUserId}> ${content}`;
 			allowedMentions.users = [String(discordUserId)];
 		}
+		// A POST needs at least its 1s timeout plus handling: without that there
+		// is nothing to send into, and the run would be killed mid-request.
+		if (timeBudgetLeftMs() < MIN_REQUEST_WINDOW_MS + 500) {
+			console.error("flushDiscordNotifications",
+				`no time left to send ${chunksLeft} chunk(s) — report not delivered`);
+			break;
+		}
 		// Split what is left of the HARD deadline across the chunks still to
 		// send, also paying for the 1s pause between them.
 		const pausesLeft = (chunksLeft - 1) * 1200;
@@ -780,15 +791,18 @@ function flushDiscordNotifications () {
 					retryAfter = Number(parsed.retry_after) || 0;
 				}
 				catch (e) { /* non-JSON body — fall through with no retry delay */ }
-				// Retrying is pointless if the sleep plus another POST would cross
-				// the hard deadline: the run is killed mid-retry and the report is
-				// lost anyway. Drop this chunk instead.
-				if (timeBudgetLeftMs() < retryAfter * 1000 + 4000) {
-					console.error("flushDiscordNotifications", "HTTP 429 — not enough time left to retry, dropping this chunk");
+				// Discord wants the full retry_after interval: waking up early
+				// just earns a second 429 (docs: "do not retry before the bucket
+				// resets"). Either wait the whole interval plus room for one POST,
+				// or do not retry at all — never retry early.
+				const waitMs = Math.max(retryAfter * 1000, 0);
+				if (waitMs + MIN_REQUEST_WINDOW_MS + 1000 > timeBudgetLeftMs()) {
+					console.error("flushDiscordNotifications",
+						`HTTP 429 — retry_after ${retryAfter}s does not fit the remaining ${Math.round(timeBudgetLeftMs() / 1000)}s, dropping this chunk`);
 					break;
 				}
-				if (retryAfter > 0) {
-					Utilities.sleep(Math.min(retryAfter * 1000, 15000)); // cap at 15s
+				if (waitMs > 0) {
+					Utilities.sleep(waitMs);
 				}
 				// Recompute: the first POST may have burned most of its window, so
 				// reusing perChunkTimeout would let the retry cross the deadline.
@@ -809,6 +823,14 @@ function flushDiscordNotifications () {
 				// instead of silently dropping the report.
 				console.error("flushDiscordNotifications",
 					`Discord webhook responded HTTP ${code}: ${discordRes.getContentText()}`);
+				// 401/403/404 mean the webhook itself is unusable. Discord's docs
+				// say not to reuse it after a 404, and repeating invalid requests
+				// can earn a temporary restriction — so stop after the first one.
+				if (code === 401 || code === 403 || code === 404) {
+					console.error("flushDiscordNotifications",
+						`webhook rejected the report (HTTP ${code}) — stopping, ${chunks.length - i - 1} chunk(s) not sent`);
+					break;
+				}
 			}
 			else {
 				console.log("flushDiscordNotifications", `Discord webhook accepted message (HTTP ${code})`);
