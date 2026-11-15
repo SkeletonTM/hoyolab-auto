@@ -160,7 +160,7 @@ If you set a webhook, the Discord report arrives within seconds.
 | `enableCodeRedemption` | `true` | Redeem active promo codes automatically; `false` = check-ins only |
 | `redeemCodesEvenIfSignedIn` | `true` | Also redeem codes for accounts already signed in today; `false` = only for accounts that just signed in |
 | `redeemSleepMs` | `6000` | Pause (ms) between code redemptions — rate-limit guard; hard floor 2000 ms enforced |
-| `maxExecutionTimeMs` | `300000` | Hard cap on total runtime (ms) so the run finishes before the GAS 6-minute limit; `0` stops immediately (tests) |
+| `maxExecutionTimeMs` | `300000` | Hard cap on total runtime (ms) so the run finishes before the GAS 6-minute limit; per-request timeouts shrink with the remaining budget, 60 s is kept for the Discord flush; `0` stops immediately (tests) |
 
 ### Code outcomes
 
@@ -281,4 +281,4 @@ npm test
 node services/google-script/__tests__/smoke-test.js
 ```
 
-102 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget, bounded request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, legacy-key migration, and the Discord report format.
+105 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget with budget-aware request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, trigger timezone handling, legacy-key migration, and the Discord report format.

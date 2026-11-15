@@ -86,7 +86,12 @@ function makeSandbox () {
 							const entry = { action: "create", handler, hour: h, everyDays: n };
 							const builder = {
 								// Optional timezone, mirroring ClockTriggerBuilder.inTimezone().
-								inTimezone: (tz) => { entry.timezone = tz; return builder; },
+								inTimezone: (tz) => {
+									// Stand-in for ClockTriggerBuilder's rejection of an
+									// unknown zone (the real API throws at create()).
+									if (tz === "Invalid/Zone") throw new Error(`Invalid timezone: ${tz}`);
+									entry.timezone = tz; return builder;
+								},
 								create: () => { triggerLog.push(entry); }
 							};
 							return builder;
@@ -193,7 +198,7 @@ function load (overrides = {}) {
 	// enableCodeRedemption defaults to true, so tests no longer patch it.
 	const src = fs.readFileSync(__dirname + "/../index.js", "utf8")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
-		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty };", sandbox);
+		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty, requestTimeoutSeconds, timeBudgetLeftMs, __setScriptStart: (ms) => { SCRIPT_START_TIME = ms; } };", sandbox);
 	return sandbox.__api;
 }
 
@@ -1553,6 +1558,42 @@ function load (overrides = {}) {
 		const created = triggerLog.filter(t => t.action === "create").pop();
 		assert.strictEqual(created.hour, 6);
 		assert.strictEqual(created.timezone, "Asia/Almaty");
+	});
+
+	// 68. The per-request timeout must shrink with the remaining budget instead
+	// of staying at 30s when only seconds are left.
+	await t("request timeout follows the remaining budget", async () => {
+		const api = load();
+		assert.strictEqual(api.requestTimeoutSeconds(60000), 30, "plenty of time -> cap");
+		assert.strictEqual(api.requestTimeoutSeconds(20000), 17, "20s left -> 17s request");
+		assert.strictEqual(api.requestTimeoutSeconds(5000), 2, "5s left -> 2s request");
+		assert.strictEqual(api.requestTimeoutSeconds(1000), 1, "never below 1s");
+	});
+
+	// 69. With the budget nearly gone the run must stop before fetching sources
+	// and still have room to post the report.
+	await t("a nearly exhausted budget still leaves room to flush", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 4000));
+		await api.manuallyRedeemCodes("genshin");
+		assert.ok(postedToDiscord.length >= 1, "report still flushed");
+		assert.ok(!fetchLog.some(u => u.includes("ennead")), "no code source fetched");
+		const slow = fetchOptsLog.filter(o => o.timeoutSeconds > 3);
+		assert.deepStrictEqual(slow.map(o => o.url), [], "post timeout follows the budget");
+	});
+
+	// 70. Creating the trigger before deleting the old one means a bad timezone
+	// cannot leave the project without any schedule.
+	await t("an invalid trigger timezone leaves the old schedule intact", async () => {
+		const api = load();
+		api.createDailyTrigger(8);
+		assert.strictEqual(triggerLog.filter(t => t.action === "create" && t.handler === "checkInAllGames").length, 1);
+		assert.throws(() => api.createDailyTrigger(9, "Invalid/Zone"), /existing triggers were left untouched/);
+		const remaining = triggerLog.filter(t => t.action === "create" && t.handler === "checkInAllGames");
+		assert.strictEqual(remaining.length, 1, "the original trigger survived");
+		assert.strictEqual(remaining[0].hour, 8, "and still points at the original hour");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

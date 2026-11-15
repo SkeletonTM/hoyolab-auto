@@ -151,8 +151,22 @@ function writeCookieProperty (game, cookies) {
 	props.deleteProperty(`COOKIE_${game}`);
 }
 
-function fetchWithTimeout (url, options) {
-	const opts = Object.assign({}, options || {}, { timeoutSeconds: REQUEST_TIMEOUT_SECONDS });
+function timeBudgetLeftMs () {
+	const limit = typeof config.maxExecutionTimeMs === "number" ? config.maxExecutionTimeMs : 300000;
+	return limit - (Date.now() - SCRIPT_START_TIME);
+}
+
+// A fixed 30s bound is not enough: if a phase starts near the cutoff, four
+// sequential requests can still overrun the 6-minute limit and starve the
+// Discord flush. The timeout therefore follows the remaining budget (keeping a
+// few seconds for response handling), capped at REQUEST_TIMEOUT_SECONDS.
+function requestTimeoutSeconds (leftMs = timeBudgetLeftMs()) {
+	return Math.max(1, Math.min(REQUEST_TIMEOUT_SECONDS, Math.floor((leftMs - 3000) / 1000)));
+}
+
+function fetchWithTimeout (url, options, timeoutOverrideSeconds) {
+	const seconds = timeoutOverrideSeconds || requestTimeoutSeconds();
+	const opts = Object.assign({}, options || {}, { timeoutSeconds: Math.max(1, seconds) });
 	return UrlFetchApp.fetch(url, opts);
 }
 
@@ -405,16 +419,19 @@ async function fetchCodes (gameParam) {
 	// returns 0 codes does not block the others: its failure is recorded in
 	// sourceHits and the caller reports it instead of pretending the list is
 	// empty on purpose. Returns { codes, sourceHits } — never a bare array.
-	const results = await Promise.allSettled(
-		CODE_SOURCE_ORDER.map(key => fetchFromSource(CODE_SOURCES[key], gameParam))
-	);
 	const byCode = new Map();
 	const sourceHits = {};
-	CODE_SOURCE_ORDER.forEach((key, i) => {
-		const r = results[i];
-		if (r.status === "fulfilled") {
-			sourceHits[key] = r.value.length;
-			for (const entry of r.value) {
+	for (const key of CODE_SOURCE_ORDER) {
+		// Checked per source, not once for the batch: three sources at 30s each
+		// would otherwise blow past the execution budget before the report.
+		if (outOfTimeBudget()) {
+			sourceHits[key] = "skipped: execution time budget";
+			continue;
+		}
+		try {
+			const list = await fetchFromSource(CODE_SOURCES[key], gameParam);
+			sourceHits[key] = list.length;
+			for (const entry of list) {
 				if (!entry || !entry.code) continue; // malformed source row — never map undefined
 				const existing = byCode.get(entry.code);
 				if (!existing) {
@@ -425,10 +442,10 @@ async function fetchCodes (gameParam) {
 				}
 			}
 		}
-		else {
-			sourceHits[key] = `failed: ${r.reason?.message || r.reason}`;
+		catch (e) {
+			sourceHits[key] = `failed: ${e?.message || e}`;
 		}
-	});
+	}
 	return { codes: [...byCode.values()], sourceHits };
 }
 
@@ -440,7 +457,7 @@ const NOTIFICATIONS = [];
 
 // Captured at module load; the redemption loops compare against this to stop
 // early when the GAS 6-minute execution limit is near (see config.maxExecutionTimeMs).
-const SCRIPT_START_TIME = Date.now();
+let SCRIPT_START_TIME = Date.now();
 
 // Seconds kept free at the end of a run so the Discord report still goes out
 // before Apps Script's hard 6-minute cutoff kills the execution.
@@ -707,6 +724,10 @@ function flushDiscordNotifications () {
 			content = `<@${discordUserId}> ${content}`;
 			allowedMentions.users = [String(discordUserId)];
 		}
+		// Split the remaining budget across the chunks still to send, so a
+		// multi-chunk report can never be starved by one slow POST.
+		const chunksLeft = chunks.length - i;
+		const perChunkTimeout = Math.max(3, Math.min(20, Math.floor((timeBudgetLeftMs() - 5000) / 1000 / chunksLeft)));
 		try {
 			const postOptions = {
 				method: "POST",
@@ -714,7 +735,7 @@ function flushDiscordNotifications () {
 				payload: JSON.stringify({ content, allowed_mentions: allowedMentions }),
 				muteHttpExceptions: true
 			};
-			let discordRes = fetchWithTimeout(webhook, postOptions);
+			let discordRes = fetchWithTimeout(webhook, postOptions, perChunkTimeout);
 			let code = discordRes.getResponseCode();
 
 			// Discord rate-limited us. It always answers 429 with retry_after
@@ -730,7 +751,7 @@ function flushDiscordNotifications () {
 				if (retryAfter > 0) {
 					Utilities.sleep(Math.min(retryAfter * 1000, 15000)); // cap at 15s
 				}
-				discordRes = fetchWithTimeout(webhook, postOptions);
+				discordRes = fetchWithTimeout(webhook, postOptions, perChunkTimeout);
 				code = discordRes.getResponseCode();
 			}
 
@@ -908,6 +929,13 @@ class Game {
 						});
 					}
 					continue;
+				}
+
+				// Stop before a multi-request stage when the flush reserve is at
+				// risk: the report matters more than one more account today.
+				if (outOfTimeBudget()) {
+					logNotification("warn", this.fullName, "Stopping early: execution time limit reached (see config.maxExecutionTimeMs)", buffer);
+					break;
 				}
 
 				// The award list only supplies today's reward NAME. Never let a
@@ -2026,17 +2054,24 @@ function createDailyTrigger (hour = 8, timezone) {
 		throw new Error(`createDailyTrigger: timezone must be an IANA name like "Asia/Almaty", got ${timezone}`);
 	}
 	const target = "checkInAllGames";
-	ScriptApp.getProjectTriggers().forEach(trigger => {
-		if (trigger.getHandlerFunction() === target) {
-			ScriptApp.deleteTrigger(trigger);
-		}
-	});
+	// Captured BEFORE creating: deleting first would leave the project with no
+	// schedule at all if inTimezone() rejects an invalid zone.
+	const existing = ScriptApp.getProjectTriggers()
+		.filter(trigger => trigger.getHandlerFunction() === target);
 	const builder = ScriptApp.newTrigger(target)
 		.timeBased()
 		.everyDays(1)
 		.atHour(hour);
-	if (timezone) builder.inTimezone(timezone);
-	builder.create();
+	try {
+		// inTimezone() itself rejects an unknown zone, so it must sit inside the
+		// same guard as create().
+		if (timezone) builder.inTimezone(timezone);
+		builder.create();
+	}
+	catch (e) {
+		throw new Error(`createDailyTrigger: trigger not created (${e?.message || e}) — existing triggers were left untouched`);
+	}
+	existing.forEach(trigger => ScriptApp.deleteTrigger(trigger));
 	console.log(`createDailyTrigger: daily ${target} trigger set for ${hour}:00${timezone ? ` ${timezone}` : ""}`);
 }
 
