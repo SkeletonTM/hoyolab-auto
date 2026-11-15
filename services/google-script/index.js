@@ -237,13 +237,16 @@ function browserHeaders (cookie, extra = {}, opts = {}) {
 }
 
 
-// Promo-code data sources. Both return the current set of active codes for a
-// given game. Two are wired in: ennead.cc (torikushiii's aggregator) and
-// Hum-Bao/hoyoverse-codes (GitHub-hosted txt files, open source). Each source
-// defines a URL builder and a parser; the fetch layer is the same.
+// Promo-code data sources. Each returns the current set of active codes for a
+// given game. Three are wired in: ennead.cc (torikushiii's aggregator),
+// Hum-Bao/hoyoverse-codes (GitHub-hosted txt files, open source) and
+// seriaati/hoyo-codes (JSON API, Asia-validated). Every source defines a URL
+// builder and a parser; the fetch layer is shared.
 //
-// fetchCodes() hits every source in CODE_SOURCE_ORDER and merges
-// the results, so adding a third source is just appending to CODE_SOURCES and
+// fetchCodes() hits every source in CODE_SOURCE_ORDER and merges the results,
+// returning { codes, sourceHits } — sourceHits keeps a per-source count or a
+// failure string, which the report turns into "sources unreachable" / "list
+// may be incomplete". Adding a source is just appending to CODE_SOURCES and
 // the order array.
 const CODE_SOURCES = {
 	ennead: {
@@ -324,9 +327,9 @@ async function fetchCodes (gameParam) {
 	// Hit every source and merge by code. NOTE: in GAS this is sequential —
 	// UrlFetchApp.fetch blocks the event loop, so Promise.allSettled only
 	// collects results, it does not parallelize. A source that fails or
-	// returns 0 codes is logged but does not block the others. If all sources
-	// fail we return an empty array, matching the behaviour of the original
-	// single-source fetchCodes() so the caller sees the same shape.
+	// returns 0 codes does not block the others: its failure is recorded in
+	// sourceHits and the caller reports it instead of pretending the list is
+	// empty on purpose. Returns { codes, sourceHits } — never a bare array.
 	const results = await Promise.allSettled(
 		CODE_SOURCE_ORDER.map(key => fetchFromSource(CODE_SOURCES[key], gameParam))
 	);
@@ -600,14 +603,21 @@ function flushDiscordNotifications () {
 	const discordUserId = getDiscordUserId();
 	for (let i = 0; i < chunks.length; i++) {
 		let content = chunks[i];
+		// Mention safety: Discord parses user mentions in webhook content by
+		// default, and our report text carries nicknames plus promo-code
+		// values returned by third-party sources — a "<@id>" inside either
+		// would ping a stranger. Suppress every mention type, and whitelist
+		// only our own configured id on the error chunk that prepends it.
+		const allowedMentions = { parse: [] };
 		if (i === 0 && hasErrors && discordUserId) {
 			content = `<@${discordUserId}> ${content}`;
+			allowedMentions.users = [String(discordUserId)];
 		}
 		try {
 			const postOptions = {
 				method: "POST",
 				contentType: "application/json",
-				payload: JSON.stringify({ content }),
+				payload: JSON.stringify({ content, allowed_mentions: allowedMentions }),
 				muteHttpExceptions: true
 			};
 			let discordRes = UrlFetchApp.fetch(webhook, postOptions);

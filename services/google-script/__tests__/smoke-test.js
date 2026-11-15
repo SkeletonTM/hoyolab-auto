@@ -42,6 +42,7 @@ let responseMap = {};
 let properties = {};
 let propertyReads = {}; // per-key getProperty call counter (device-id caching assertion)
 let postedToDiscord = [];
+let postedPayloads = []; // full webhook JSON bodies (allowed_mentions assertions)
 let consoleLog = []; // every console.* call from index.js, arguments serialized
 let lockAvailable = true; // LockService stub: false simulates another instance running
 let lockHeld = false; // LockService state: true while a run holds the script lock
@@ -143,6 +144,7 @@ function makeSandbox () {
 				}
 				if (url.includes("discord.com")) {
 					postedToDiscord.push(JSON.parse(opts.payload || "{}").content);
+					postedPayloads.push(JSON.parse(opts.payload || "{}"));
 					if (typeof discordResponder === "function") return discordResponder(url, opts);
 					return { getResponseCode: () => 204, getContentText: () => "" };
 				}
@@ -153,7 +155,7 @@ function makeSandbox () {
 }
 
 function load (overrides = {}) {
-	fetchLog = []; fetchOptsLog = []; signBodies = []; postedToDiscord = []; sleepCalls = []; headerLog = [];
+	fetchLog = []; fetchOptsLog = []; signBodies = []; postedToDiscord = []; postedPayloads = []; sleepCalls = []; headerLog = [];
 	consoleLog = []; lockHeld = false;
 	uuidCounter = 0; discordResponder = null;
 	properties = {}; propertyReads = {}; triggerLog = []; // fresh script-properties per scenario — tests must not leak state
@@ -1365,6 +1367,36 @@ function load (overrides = {}) {
 		const api = load();
 		assert.strictEqual(api.config.enableCodeRedemption, true, "enableCodeRedemption defaults to true");
 		assert.strictEqual(api.config.redeemCodesEvenIfSignedIn, true, "redeemCodesEvenIfSignedIn defaults to true");
+	});
+
+	// 56. Mention safety: webhook payloads parse user mentions by default, and
+	// report text carries nicknames/codes from third-party sources. Everything
+	// must be suppressed unless it is the configured Discord user on an error.
+	await t("webhook payload suppresses mentions coming from report data", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: -1, message: "<@999999999999999999> injected" }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const payload = postedPayloads[0];
+		assert.ok(payload, "webhook payload captured");
+		assert.ok(payload.content.includes("<@999999999999999999>"), "text itself is preserved");
+		assert.deepStrictEqual(payload.allowed_mentions.parse, [], "no mention parsing enabled");
+		assert.ok(!payload.allowed_mentions.users || payload.allowed_mentions.users.length === 0, "no user allowed");
+	});
+
+	// 57. The configured id still pings on error chunks, and only there.
+	await t("webhook allows only the configured id on error reports", async () => {
+		const api = load({
+			"webExchangeCdkey": { retcode: -1, message: "boom" }
+		});
+		properties.DISCORD_ID = "123456789012345678";
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const payload = postedPayloads[0];
+		assert.ok(payload.content.startsWith("<@123456789012345678>"), "configured id mentioned on the error chunk");
+		assert.deepStrictEqual(payload.allowed_mentions.users, ["123456789012345678"], "only that id is allowed");
+		assert.deepStrictEqual(payload.allowed_mentions.parse, [], "nothing else is parsed");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

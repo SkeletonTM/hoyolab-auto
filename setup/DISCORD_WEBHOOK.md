@@ -60,7 +60,8 @@ report (grouped per account), and promo-code lines if redemption is enabled.
 
 If nothing arrives:
 
-- The URL must be the full `https://discord.com/api/webhooks/…` value.
-- If every account was already signed in and there were no code events or
-  errors, the buffer is empty and the script deliberately sends nothing.
+- If nothing arrives at all: the URL must be the full `https://discord.com/api/webhooks/…` value.
+- The script sends nothing only when there is genuinely nothing to report — e.g. no
+  accounts configured. An account that was already signed in still logs an
+  "Already signed in today" line, so that case does produce a message.
 - Check the **Executions** tab for a `flushDiscordNotifications` error.

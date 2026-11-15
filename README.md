@@ -252,9 +252,9 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | Discord notifications on check-in | ✅ (only on a new sign-in) | ✅ (always) |
 | Discord notifications on code redemption | ❌ | ✅ |
 | Discord notifications on errors | ❌ | ✅ |
-| Webhook POSTs per run | up to 4 × accounts | exactly 1 |
-| Files in the repo | 100+ | 9 |
-| Code source | `api.ennead.cc` only | `api.ennead.cc` + Hum-Bao, merged from both |
+| Webhook POSTs per run | up to 4 × accounts | 1, plus 1 per extra chunk when the report exceeds 1900 chars |
+| Files in the repo | 100+ | 10 |
+| Code source | `api.ennead.cc` only | `api.ennead.cc` + Hum-Bao + seriaati, merged and deduplicated |
 
 ---
 
