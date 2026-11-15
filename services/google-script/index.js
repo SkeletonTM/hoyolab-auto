@@ -153,6 +153,26 @@ function writeCookieProperty (game, cookies) {
 	props.deleteProperty(`COOKIE_${game}`);
 }
 
+// One throttle for the whole run. All accounts execute inside a single script
+// run, so a per-account pause would let the last code of account A and the
+// first code of account B go back-to-back — exactly the burst the pause exists
+// to prevent.
+let lastRedemptionAt = 0;
+
+function paceRedemption () {
+	const pauseMs = Math.max(config.redeemSleepMs, 2000);
+	const waitMs = lastRedemptionAt === 0 ? 0 : lastRedemptionAt + pauseMs - Date.now();
+	if (waitMs <= 0) {
+		lastRedemptionAt = Date.now();
+		return true;
+	}
+	// Never sleep into the report reserve: stop the loop instead.
+	if (workTimeLeftMs() < waitMs + 3000) return false;
+	Utilities.sleep(waitMs);
+	lastRedemptionAt = Date.now();
+	return true;
+}
+
 function timeBudgetLeftMs () {
 	const limit = typeof config.maxExecutionTimeMs === "number" ? config.maxExecutionTimeMs : 300000;
 	return limit - (Date.now() - SCRIPT_START_TIME);
@@ -1038,10 +1058,19 @@ class Game {
 
 				// The award list only supplies today's reward NAME. Never let a
 				// flaky /home endpoint cancel the sign-in itself: that is the one
-				// irreversible action of the run.
-				const awardsData = await this.getAwardsData(cookie);
+				// irreversible action of the run. The lookup is also optional
+				// work — when only one request window is left, spend it on /sign
+				// instead of on the reward name.
+				let awardsData = { success: false, skipped: true, blocked: false };
+				if (workTimeLeftMs() > MIN_REQUEST_WINDOW_MS * 2) {
+					awardsData = await this.getAwardsData(cookie);
+				}
+				else {
+					logNotification("warn", this.fullName,
+						`${accountDetails.nickname} (${accountDetails.uid}): skipped the reward lookup to keep time for the sign-in`, buffer);
+				}
 				let awards = null;
-				if (!awardsData.success) {
+				if (!awardsData.success && !awardsData.skipped) {
 					const reason = awardsData.blocked
 						? "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403)"
 						: awardsData.transient
@@ -1463,6 +1492,11 @@ class Game {
 				break;
 			}
 
+			if (!paceRedemption()) {
+				logNotification("warn", this.fullName,
+					"Rate-limit pause skipped: stopping before the report reserve (see config.maxExecutionTimeMs)", buffer);
+				break;
+			}
 			const result = await this.redeemCode(account, code.code);
 
 			// If the server is down, the cookie is dead or we hit a CAPTCHA gate,
@@ -1521,22 +1555,6 @@ class Game {
 			else {
 				const msg = String(result ? result.message : "Unknown error");
 				failed.push(`${code.code} (${truncateMsg(msg)})`);
-			}
-
-			// Rate-limit pause between redemption calls — never after the final
-			// code (wasted seconds), and never when it would eat the Discord
-			// flush reserve. Placed after the result is recorded so stopping
-			// here keeps the outcome of the code that was just processed.
-			// Floor 2000ms: a smaller redeemSleepMs is a rate-limit ban waiting
-			// to happen.
-			if (i < codes.length - 1) {
-				const pauseMs = Math.max(config.redeemSleepMs, 2000);
-				if (workTimeLeftMs() < pauseMs + 3000) {
-					logNotification("warn", this.fullName,
-						"Rate-limit pause skipped: stopping before the report reserve (see config.maxExecutionTimeMs)", buffer);
-					break;
-				}
-				Utilities.sleep(pauseMs);
 			}
 		}
 
@@ -1599,6 +1617,11 @@ class Game {
 				logNotification("warn", this.fullName, `Stopping early to avoid GAS 6-minute execution limit`, buffer);
 				break;
 			}
+			if (!paceRedemption()) {
+				logNotification("warn", this.fullName,
+					"Rate-limit pause skipped: stopping before the report reserve (see config.maxExecutionTimeMs)", buffer);
+				break;
+			}
 			const result = await this.redeemCode(account, code.code);
 
 			// Stop early on server-down / dead cookie / CAPTCHA, same as redeemCodes.
@@ -1648,18 +1671,6 @@ class Game {
 			}
 			else {
 				failed.push(`${code.code} — ${truncateMsg(String(result ? result.message : "Unknown error"))}`);
-			}
-
-			// Same pacing rule as the normal run: never sleep into the reserve,
-			// and keep the result of the code processed just now.
-			if (i < codes.length - 1) {
-				const pauseMs = Math.max(config.redeemSleepMs, 2000);
-				if (workTimeLeftMs() < pauseMs + 3000) {
-					logNotification("warn", this.fullName,
-						"Rate-limit pause skipped: stopping before the report reserve (see config.maxExecutionTimeMs)", buffer);
-					break;
-				}
-				Utilities.sleep(pauseMs);
 			}
 		}
 
@@ -1944,7 +1955,11 @@ class Game {
 		const stored = props.getProperty(uidKey);
 		if (stored) {
 			try {
-				return JSON.parse(stored);
+				const parsed = JSON.parse(stored);
+				// Valid JSON is not necessarily a list: a hand-edited "{}" or
+				// "null" would make .includes() throw later. Recover as empty.
+				if (Array.isArray(parsed)) return parsed;
+				console.warn(`getRedeemedCodes: ${uidKey} is not an array — ignoring it`);
 			}
 			catch (e) { /* malformed — fall through */ }
 		}
@@ -1984,7 +1999,13 @@ class Game {
 		const existing = props.getProperty(uidKey);
 		if (existing) {
 			try {
-				redeemedCodes = JSON.parse(existing);
+				const parsed = JSON.parse(existing);
+				if (Array.isArray(parsed)) {
+					redeemedCodes = parsed;
+				}
+				else {
+					console.warn(`saveRedeemedCodes: ${uidKey} is not an array — starting a fresh list`);
+				}
 			}
 			catch (e) {
 				redeemedCodes = [];
@@ -2030,7 +2051,9 @@ class Game {
 		const stored = props.getProperty(uidKey);
 		if (stored) {
 			try {
-				return JSON.parse(stored);
+				const parsed = JSON.parse(stored);
+				if (Array.isArray(parsed)) return parsed;
+				console.warn(`getBlockedCodes: ${uidKey} is not an array — ignoring it`);
 			}
 			catch (e) { /* malformed — fall through */ }
 		}
@@ -2044,7 +2067,13 @@ class Game {
 		const existing = props.getProperty(uidKey);
 		if (existing) {
 			try {
-				blockedCodes = JSON.parse(existing);
+				const parsed = JSON.parse(existing);
+				if (Array.isArray(parsed)) {
+					blockedCodes = parsed;
+				}
+				else {
+					console.warn(`saveBlockedCodes: ${uidKey} is not an array — starting a fresh list`);
+				}
 			}
 			catch (e) {
 				blockedCodes = [];

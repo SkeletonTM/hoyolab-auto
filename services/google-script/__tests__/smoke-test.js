@@ -1141,14 +1141,16 @@ function load (overrides = {}) {
 		assert.strictEqual(api.extractLtuid("ltuid=999 ; x=1"), "999", "trailing space after value");
 	});
 
-	// 44. redeemSleepMs clamped to a safe minimum
+	// 44. redeemSleepMs clamped to a safe minimum. Pacing measures the interval
+	// from the previous request, so a mock run (sub-ms requests) sleeps just
+	// under the floor - allow that measurement drift, not a lower floor.
 	await t("redeemSleepMs is clamped to at least 2000ms", async () => {
 		const api = load();
 		api.config.redeemSleepMs = 100;
 		api.config.genshin.data = [COOKIE];
 		await api.manuallyRedeemCodes("genshin", false);
 		assert.ok(sleepCalls.length > 0, "redeem loop slept");
-		assert.ok(sleepCalls.every(ms => ms >= 2000), `all sleeps >= 2000 (got ${sleepCalls.join(",")})`);
+		assert.ok(sleepCalls.every(ms => ms >= 1900), `all sleeps ~2000 (got ${sleepCalls.join(",")})`);
 	});
 
 	// 45. Discord 429 -> parse retry_after, sleep, retry once
@@ -1791,6 +1793,51 @@ function load (overrides = {}) {
 			assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 1,
 				`retry_after ${JSON.stringify(bad)} must not be retried`);
 		}
+	});
+
+	// 84. The optional award lookup must never take the window the sign-in
+	// needs: with one request window left it is skipped and /sign still runs.
+	await t("awards are skipped so the sign-in still fits", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 62500)); // 2.5s of work left
+		await api.checkInAllGames();
+		assert.strictEqual(fetchLog.filter(u => u.includes("/home?act_id")).length, 0, "awards not requested");
+		assert.strictEqual(fetchLog.filter(u => u.includes("/sign")).length, 1, "sign still attempted");
+		assert.ok(postedToDiscord.join("\n").includes("skipped the reward lookup"), "the skip is reported");
+	});
+
+	// 85. Redemption pacing is shared across accounts: one code per account must
+	// still be spaced, not fired back-to-back.
+	await t("pacing applies between accounts, not only within one", async () => {
+		const api = load({
+			"api.ennead.cc": { active: [{ code: "ONLY1", rewards: [] }] },
+			"raw.githubusercontent.com": "" // one code per account, so the pause is the only spacing
+		});
+		const cookieB = "ltuid_v2=87654321; ltoken_v2=abc; other=1";
+		api.config.genshin.data = [COOKIE, cookieB];
+		api.config.maxExecutionTimeMs = 300000;
+		api.config.redeemSleepMs = 6000;
+		api.__sleepAdvancesClock(true);
+		await api.manuallyRedeemCodes("genshin");
+		const redeems = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		assert.strictEqual(redeems, 2, "both accounts redeemed their one code");
+		assert.ok(sleepCalls.some(ms => ms >= 5000), `a pause sits between the two accounts: ${sleepCalls}`);
+	});
+
+	// 86. A Script Property holding valid-but-non-array JSON must not break the
+	// account: it is ignored and rewritten as a list.
+	await t("non-array persisted values are ignored, not crashed on", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		properties["genshin_redeemed_codes_800000001"] = "{}";
+		properties["genshin_blocked_codes_800000001"] = "null";
+		await api.manuallyRedeemCodes("genshin");
+		const stored = JSON.parse(properties["genshin_redeemed_codes_800000001"]);
+		assert.ok(Array.isArray(stored), "redeemed list recovered as an array");
+		assert.ok(stored.includes("TESTCODE1"), "and still records the new code");
+		assert.ok(consoleLog.join("\n").includes("is not an array"), "the recovery is logged");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);
