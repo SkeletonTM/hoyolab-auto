@@ -45,6 +45,7 @@ let postedToDiscord = [];
 let postedPayloads = []; // full webhook JSON bodies (allowed_mentions assertions)
 let clockSkewMs = 0;     // simulated elapsed time for budget tests
 let slowUrls = new Set(); // url patterns whose stub burns wall-clock time
+let sleepAdvancesClock = false; // Utilities.sleep() consumes the budget in pacing tests
 const RealDate = Date;
 let consoleLog = []; // every console.* call from index.js, arguments serialized
 let lockAvailable = true; // LockService stub: false simulates another instance running
@@ -78,7 +79,7 @@ function makeSandbox () {
 		console: makeConsole(),
 		JSON, Math, Date, Array, Object, String, Number, Map, Promise, Error, RegExp,
 		Utilities: {
-			sleep: ms => { sleepCalls.push(ms); },
+			sleep: ms => { sleepCalls.push(ms); if (sleepAdvancesClock) clockSkewMs += ms; },
 			getUuid: () => `uuid-${++uuidCounter}`
 		},
 		ScriptApp: {
@@ -158,6 +159,7 @@ function makeSandbox () {
 					}
 				}
 				if (url.includes("discord.com")) {
+					if (slowUrls.has("discord.com")) clockSkewMs += 5000; // stalled POST
 					postedToDiscord.push(JSON.parse(opts.payload || "{}").content);
 					postedPayloads.push(JSON.parse(opts.payload || "{}"));
 					if (typeof discordResponder === "function") return discordResponder(url, opts);
@@ -173,7 +175,7 @@ function load (overrides = {}) {
 	fetchLog = []; fetchOptsLog = []; signBodies = []; postedToDiscord = []; postedPayloads = []; sleepCalls = []; headerLog = [];
 	consoleLog = []; lockHeld = false;
 	uuidCounter = 0; discordResponder = null;
-	properties = {}; propertyReads = {}; triggerLog = []; clockSkewMs = 0; slowUrls = new Set(); // fresh state per scenario
+	properties = {}; propertyReads = {}; triggerLog = []; clockSkewMs = 0; slowUrls = new Set(); sleepAdvancesClock = false; // fresh state per scenario
 	// Object-spread would let defaults overwrite same-key overrides; instead
 	// build an ordered entries array where overrides always match first.
 	const defaults = {
@@ -209,7 +211,7 @@ function load (overrides = {}) {
 	// enableCodeRedemption defaults to true, so tests no longer patch it.
 	const src = fs.readFileSync(__dirname + "/../index.js", "utf8")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
-		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty, requestTimeoutSeconds, timeBudgetLeftMs, __setScriptStart: (ms) => { SCRIPT_START_TIME = ms; }, __slow: (pattern) => __slowSet.add(pattern) };", sandbox);
+		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty, requestTimeoutSeconds, timeBudgetLeftMs, flushDiscordNotifications, __sleepAdvancesClock: (v) => { sleepAdvancesClock = v; }, __setScriptStart: (ms) => { SCRIPT_START_TIME = ms; }, __slow: (pattern) => __slowSet.add(pattern) };", sandbox);
 	return sandbox.__api;
 }
 
@@ -1635,6 +1637,54 @@ function load (overrides = {}) {
 		assert.ok(!/unreachable/i.test(text), `no fake outage: ${text}`);
 		assert.ok(/not checked|time budget/i.test(text), `budget skip is named: ${text}`);
 		assert.strictEqual(fetchLog.filter(u => u.includes("raw.githubusercontent.com")).length, 0, "second source never requested");
+	});
+
+	// 73. A 429 retry must size its own timeout from the time left: the first
+	// POST may already have burned most of the window it was granted.
+	await t("a 429 retry recomputes its timeout from the remaining window", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 20000)); // 20s hard left
+		api.__sleepAdvancesClock(true);
+		api.__slow("discord.com");
+		let calls = 0;
+		discordResponder = () => (++calls === 1
+			? { getResponseCode: () => 429, getContentText: () => JSON.stringify({ retry_after: 1 }) }
+			: { getResponseCode: () => 204, getContentText: () => "" });
+		await api.checkInAllGames();
+		const posts = fetchOptsLog.filter(o => o.url.includes("discord.com"));
+		assert.strictEqual(posts.length, 2, "one POST plus one retry");
+		assert.ok(posts[1].timeoutSeconds < posts[0].timeoutSeconds,
+			`retry timeout shrinks with the window: ${posts.map(p => p.timeoutSeconds).join(" -> ")}`);
+		assert.ok(posts[1].timeoutSeconds * 1000 <= 14000, "retry fits inside what is actually left");
+	});
+
+	// 74. A long rate-limit pause must not eat the report reserve: the loop
+	// stops with the result of the code it already processed.
+	await t("redemption pacing does not sleep into the report reserve", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		api.config.maxExecutionTimeMs = 300000;
+		api.config.redeemSleepMs = 90000;
+		api.__setScriptStart(Date.now() - (300000 - 68000)); // 68s hard -> 8s work
+		await api.manuallyRedeemCodes("genshin");
+		assert.strictEqual(fetchLog.filter(u => u.includes("webExchangeCdkey")).length, 1, "second code never attempted");
+		assert.deepStrictEqual(sleepCalls.filter(ms => ms > 60000), [], "no pacing sleep inside the reserve");
+		assert.ok(postedToDiscord.join("\n").includes("Rate-limit pause skipped"), "the stop is reported");
+	});
+
+	// 75. When the chunk list cannot fit the flush window, the remainder is
+	// condensed into one truncated message instead of 1s POSTs past the limit.
+	await t("a report that cannot fit is condensed, not overrun", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		for (let i = 0; i < 60; i++) api.NOTIFICATIONS.push(`line ${i} ${"x".repeat(120)}`);
+		api.__setScriptStart(Date.now() - (300000 - 6000)); // 6s window, ~5 chunks needed
+		api.flushDiscordNotifications();
+		assert.strictEqual(postedToDiscord.length, 1, "exactly one condensed message");
+		assert.ok(postedToDiscord[0].includes("report truncated"), "truncation is stated in the message");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

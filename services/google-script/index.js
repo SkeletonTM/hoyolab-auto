@@ -729,6 +729,21 @@ function flushDiscordNotifications () {
 
 	const discordUserId = getDiscordUserId();
 	for (let i = 0; i < chunks.length; i++) {
+		// Affordability guard: every remaining chunk needs at least 1s of POST
+		// plus its inter-chunk pause. When they cannot all fit, condense the rest
+		// into one truncated message instead of authorising 1s requests past the
+		// hard deadline (a 60s window cannot carry 40 chunks plus pauses).
+		let chunksLeft = chunks.length - i;
+		if (chunksLeft > 1 && timeBudgetLeftMs() < chunksLeft * 1000 + (chunksLeft - 1) * 1200 + 2000) {
+			const rest = chunks.slice(i).join("\n");
+			console.error("flushDiscordNotifications",
+				`not enough time to send ${chunksLeft} chunks — condensing the remainder into one truncated message`);
+			chunks.length = i;
+			chunks.push(`${rest.slice(0, 1800)}\n… [report truncated: ${chunksLeft} messages did not fit in the time budget]`);
+			chunksLeft = 1;
+		}
+		// Read the chunk AFTER the condense step: otherwise the guard rewrites
+		// chunks[i] while the old (uncondensed) text is already in hand.
 		let content = chunks[i];
 		// Mention safety: Discord parses user mentions in webhook content by
 		// default, and our report text carries nicknames plus promo-code
@@ -741,9 +756,7 @@ function flushDiscordNotifications () {
 			allowedMentions.users = [String(discordUserId)];
 		}
 		// Split what is left of the HARD deadline across the chunks still to
-		// send, also paying for the 1s pause between them. No lower bound that
-		// could exceed the remaining time: a 3s floor on a 2s window is a kill.
-		const chunksLeft = chunks.length - i;
+		// send, also paying for the 1s pause between them.
 		const pausesLeft = (chunksLeft - 1) * 1200;
 		const perChunkTimeout = Math.max(1, Math.min(20,
 			Math.floor((timeBudgetLeftMs() - pausesLeft - 2000) / 1000 / chunksLeft)));
@@ -777,7 +790,15 @@ function flushDiscordNotifications () {
 				if (retryAfter > 0) {
 					Utilities.sleep(Math.min(retryAfter * 1000, 15000)); // cap at 15s
 				}
-				discordRes = fetchWithTimeout(webhook, postOptions, perChunkTimeout);
+				// Recompute: the first POST may have burned most of its window, so
+				// reusing perChunkTimeout would let the retry cross the deadline.
+				const retryLeft = timeBudgetLeftMs();
+				const retryTimeout = Math.max(1, Math.min(20, Math.floor((retryLeft - 1500) / 1000)));
+				if (retryLeft < retryTimeout * 1000 + 1000) {
+					console.error("flushDiscordNotifications", "HTTP 429 — no time left for a bounded retry, dropping this chunk");
+					break;
+				}
+				discordRes = fetchWithTimeout(webhook, postOptions, retryTimeout);
 				code = discordRes.getResponseCode();
 			}
 
@@ -1418,14 +1439,6 @@ class Game {
 				break;
 			}
 
-			// Rate-limit pause between redemption calls — but never after the
-			// final code, where it would just add wasted seconds to the run.
-			// Clamped to a safe floor: a user-set redeemSleepMs below 2000ms
-			// is a rate-limit ban waiting to happen.
-			if (i < codes.length - 1) {
-				Utilities.sleep(Math.max(config.redeemSleepMs, 2000));
-			}
-
 			if (result && result.success) {
 				newlyRedeemed.push(code.code);
 				claimed.push(code.code);
@@ -1462,6 +1475,22 @@ class Game {
 			else {
 				const msg = String(result ? result.message : "Unknown error");
 				failed.push(`${code.code} (${truncateMsg(msg)})`);
+			}
+
+			// Rate-limit pause between redemption calls — never after the final
+			// code (wasted seconds), and never when it would eat the Discord
+			// flush reserve. Placed after the result is recorded so stopping
+			// here keeps the outcome of the code that was just processed.
+			// Floor 2000ms: a smaller redeemSleepMs is a rate-limit ban waiting
+			// to happen.
+			if (i < codes.length - 1) {
+				const pauseMs = Math.max(config.redeemSleepMs, 2000);
+				if (workTimeLeftMs() < pauseMs + 3000) {
+					logNotification("warn", this.fullName,
+						"Rate-limit pause skipped: stopping before the report reserve (see config.maxExecutionTimeMs)", buffer);
+					break;
+				}
+				Utilities.sleep(pauseMs);
 			}
 		}
 
@@ -1544,10 +1573,6 @@ class Game {
 				break;
 			}
 
-			if (i < codes.length - 1) {
-				Utilities.sleep(Math.max(config.redeemSleepMs, 2000));
-			}
-
 			if (result && result.success) {
 				// Keep the local redeemed-list in sync so a normal run tomorrow
 				// doesn't retry codes the force-run already claimed.
@@ -1577,6 +1602,18 @@ class Game {
 			}
 			else {
 				failed.push(`${code.code} — ${truncateMsg(String(result ? result.message : "Unknown error"))}`);
+			}
+
+			// Same pacing rule as the normal run: never sleep into the reserve,
+			// and keep the result of the code processed just now.
+			if (i < codes.length - 1) {
+				const pauseMs = Math.max(config.redeemSleepMs, 2000);
+				if (workTimeLeftMs() < pauseMs + 3000) {
+					logNotification("warn", this.fullName,
+						"Rate-limit pause skipped: stopping before the report reserve (see config.maxExecutionTimeMs)", buffer);
+					break;
+				}
+				Utilities.sleep(pauseMs);
 			}
 		}
 
