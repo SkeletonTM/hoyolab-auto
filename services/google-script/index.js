@@ -137,11 +137,16 @@ function writeCookieProperty (game, cookies) {
 	// Every chunk is a separate property, so no value can hit the 9KB cap.
 	parts.forEach((part, idx) => props.setProperty(`COOKIE_${game}_${idx + 1}`, part));
 	props.setProperty(`COOKIE_${game}_PARTS`, String(parts.length));
-	// Clear leftovers from a previous, longer set so they can never be appended
-	// to a newer, shorter one.
-	for (let i = parts.length + 1; i <= parts.length + 10; i++) {
-		if (props.getProperty(`COOKIE_${game}_${i}`) === null) break;
-		props.deleteProperty(`COOKIE_${game}_${i}`);
+	// Remove EVERY chunk left over from a previous, longer set. They are
+	// invisible to the reader (PARTS is smaller) but still hold old session
+	// cookies, so enumerating the property store is the only safe cleanup.
+	const all = props.getProperties();
+	const chunkPattern = new RegExp(`^COOKIE_${game}_(\\d+)$`);
+	for (const key of Object.keys(all)) {
+		const match = key.match(chunkPattern);
+		if (match && Number(match[1]) > parts.length) {
+			props.deleteProperty(key);
+		}
 	}
 	props.deleteProperty(`COOKIE_${game}`);
 }
@@ -177,7 +182,7 @@ function getWebhook () {
 // and a Discord webhook URL contains its token. Strip it before it reaches the
 // execution log, where anyone with project access could copy it.
 function redactWebhook (text) {
-	return String(text).replace(/https:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/g, "<webhook>");
+	return String(text).replace(/https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/g, "<webhook>");
 }
 
 function getDiscordUserId () {
@@ -1574,6 +1579,14 @@ class Game {
 				return { success: false, transient: true, status: parsed.status, message: "HoYoLAB returned a non-JSON response — server unavailable, retry later" };
 			}
 			const data = parsed.data;
+
+			// A JSON body with retcode 0 is not proof of success: a gateway or
+			// edge status (404/302/502 carrying a JSON envelope) must never be
+			// reported — or persisted — as a redeemed code.
+			if (g.status !== 200) {
+				console.error(`Code ${code} redemption returned HTTP ${g.status} for ${this.fullName} — treating as transient`);
+				return { success: false, transient: true, status: g.status, message: `HTTP ${g.status} — unexpected status, retry later` };
+			}
 
 			// Check for authentication errors and other failures
 			// HoYoLAB's risk-gate can appear even with retcode 0, so check it first.

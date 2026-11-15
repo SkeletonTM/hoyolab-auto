@@ -55,7 +55,7 @@ so either style works. To copy the inline values into properties quickly, run
 ## 3. Verify
 
 Run `checkInAllGames()` once manually. Within a few seconds you should see a
-single Discord message in the channel: a short Ju Fufu voice line, the check-in
+Discord report in the channel (split into 1900-character chunks when long): a short Ju Fufu voice line, the check-in
 report (grouped per account), and promo-code lines if redemption is enabled.
 
 If nothing arrives:

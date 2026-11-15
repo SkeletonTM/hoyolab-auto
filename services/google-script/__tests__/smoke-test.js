@@ -1465,6 +1465,49 @@ function load (overrides = {}) {
 		assert.ok(!api.redactWebhook(raw).includes("testhook"));
 	});
 
+	// 61. A JSON body with retcode 0 is not a successful redemption when the
+	// HTTP status is not 200 - the code must not be persisted as redeemed.
+	await t("a non-200 redemption response is never persisted as redeemed", async () => {
+		const api = load({
+			"webExchangeCdkey": () => ({
+				getResponseCode: () => 404,
+				getContentText: () => JSON.stringify({ retcode: 0, message: "ok" })
+			})
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin");
+		const stored = Object.keys(properties)
+			.filter(k => k.includes("redeemed_codes"))
+			.map(k => properties[k]).join("");
+		assert.ok(!stored.includes("GENSHIN"), `nothing persisted, stored=${stored}`);
+		assert.ok(!/🎁/.test(postedToDiscord.join("\n")), "no claim reported");
+	});
+
+	// 62. getWebhook() accepts canary./ptb. hosts, so redaction must cover them
+	// too - otherwise the token leaks exactly for the URLs it validated.
+	await t("webhook redaction covers every accepted host variant", async () => {
+		const api = load();
+		for (const host of ["discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"]) {
+			const text = `DNS error: https://${host}/api/webhooks/1234567890/tok`;
+			assert.strictEqual(api.redactWebhook(text), "DNS error: <webhook>", host);
+		}
+	});
+
+	// 63. Shrinking a large cookie set must not leave orphan chunks behind:
+	// they are unreadable but still hold old session credentials.
+	await t("replacing a large cookie set removes every stale chunk", async () => {
+		const api = load();
+		api.config.genshin.data = ["a".repeat(110000)];
+		api.storeSecretsFromConfig();
+		const before = Object.keys(properties).filter(k => /^COOKIE_genshin_\d+$/.test(k));
+		assert.ok(before.length >= 12, `large set produced ${before.length} chunks`);
+		api.config.genshin.data = ["ltuid_v2=1; cookie_token_v2=2"];
+		api.storeSecretsFromConfig();
+		const after = Object.keys(properties).filter(k => /^COOKIE_genshin_\d+$/.test(k)).sort();
+		assert.deepStrictEqual(after, ["COOKIE_genshin_1"], "only the current chunk remains");
+		assert.deepStrictEqual(api.getCookies("genshin"), ["ltuid_v2=1; cookie_token_v2=2"]);
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();

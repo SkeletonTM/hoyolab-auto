@@ -73,7 +73,7 @@ const DISCORD_USER_ID = "";    // optional: your Discord user ID (pings you on e
 - Follow [`setup/DISCORD_WEBHOOK.md`](setup/DISCORD_WEBHOOK.md) to create a webhook, then paste the URL into `DISCORD_WEBHOOK`.
 - Want an `@mention` on errors? Put your numeric Discord user ID into `DISCORD_USER_ID`.
 
-With a webhook set, **every** run posts a single Discord message — a short voice line from Ju Fufu 🐯, the check-in report grouped per account (each line in a quote block), and promo-code lines if redemption is on:
+With a webhook set, **every** run posts a Discord report — a short voice line from Ju Fufu 🐯, the check-in report grouped per account (each line in a quote block), and promo-code lines if redemption is on. A long report is split into several messages at 1900 characters:
 
 ```text
 Fu-fu-fu~ 🐯 The little tiger went hunting today — look what she dragged back!
@@ -143,7 +143,7 @@ If you set a webhook, the Discord report arrives within seconds.
    - read the award pool (`getAwardsData`),
    - if not signed in yet, sign in (`sign`).
    - If `enableCodeRedemption` is on, redeem new promo codes (`redeemCodes`).
-3. **Flush** everything to Discord as a single message (`flushDiscordNotifications`).
+3. **Flush** everything to Discord (`flushDiscordNotifications`) — one message, split into 1900-character chunks when the report is long.
 
 `manuallyRedeemCodes(gameName, forceRedeem)` does the same but **only** redeems codes (no check-in). It's what the `redeemGenshinCodes` / `redeemStarRailCodes` / `redeemZenlessCodes` helpers call.
 
