@@ -1479,7 +1479,10 @@ function load (overrides = {}) {
 		const stored = Object.keys(properties)
 			.filter(k => k.includes("redeemed_codes"))
 			.map(k => properties[k]).join("");
-		assert.ok(!stored.includes("GENSHIN"), `nothing persisted, stored=${stored}`);
+		// Assert on the fixture's real codes, not a substring that never appears
+		// in this data set: TESTCODE1/2 are what a wrong success path would store.
+		assert.ok(!stored.includes("TESTCODE1") && !stored.includes("TESTCODE2"),
+			`neither fixture code is persisted, stored=${stored}`);
 		assert.ok(!/🎁/.test(postedToDiscord.join("\n")), "no claim reported");
 	});
 

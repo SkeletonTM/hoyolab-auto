@@ -143,7 +143,7 @@ If you set a webhook, the Discord report arrives within seconds.
    - read the award pool (`getAwardsData`),
    - if not signed in yet, sign in (`sign`).
    - If `enableCodeRedemption` is on, redeem new promo codes (`redeemCodes`).
-3. **Flush** everything to Discord (`flushDiscordNotifications`) — one message, split into 1900-character chunks when the report is long.
+3. **Flush** everything to Discord (`flushDiscordNotifications`) — long reports are split into multiple messages of up to 1900 characters.
 
 `manuallyRedeemCodes(gameName, forceRedeem)` does the same but **only** redeems codes (no check-in). It's what the `redeemGenshinCodes` / `redeemStarRailCodes` / `redeemZenlessCodes` helpers call.
 
