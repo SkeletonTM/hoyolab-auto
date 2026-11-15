@@ -104,8 +104,50 @@ const DISCORD_USER_ID = ""; // Optional: Discord user ID to ping on errors (e.g.
 // below — it copies everything into Script Properties for you.
 // ---------------------------------------------------------------------------
 
+// Apps Script rejects a single property value above 9KB. One full session
+// cookie (ltoken_v2 + cookie_token_v2 + ltuid_v2 + extras) is ~1.5KB, so five
+// or more accounts overflow a single COOKIE_<game> value and setProperty()
+// throws mid-write. Values are therefore split into COOKIE_<game>_1..N plus a
+// COOKIE_<game>_PARTS counter; the plain key is still read first so existing
+// installs keep working without a migration.
+const PROPERTY_CHUNK_SIZE = 8000;
+
+function readCookieProperty (game) {
+	const props = PropertiesService.getScriptProperties();
+	const single = props.getProperty(`COOKIE_${game}`);
+	if (single) return single;
+	const parts = Number(props.getProperty(`COOKIE_${game}_PARTS`) || 0);
+	if (!parts) return null;
+	let json = "";
+	for (let i = 1; i <= parts; i++) {
+		const part = props.getProperty(`COOKIE_${game}_${i}`);
+		if (part === null) return null; // half-written set: fall back to config
+		json += part;
+	}
+	return json;
+}
+
+function writeCookieProperty (game, cookies) {
+	const props = PropertiesService.getScriptProperties();
+	const json = JSON.stringify(cookies);
+	const parts = [];
+	for (let i = 0; i < json.length; i += PROPERTY_CHUNK_SIZE) {
+		parts.push(json.slice(i, i + PROPERTY_CHUNK_SIZE));
+	}
+	// Every chunk is a separate property, so no value can hit the 9KB cap.
+	parts.forEach((part, idx) => props.setProperty(`COOKIE_${game}_${idx + 1}`, part));
+	props.setProperty(`COOKIE_${game}_PARTS`, String(parts.length));
+	// Clear leftovers from a previous, longer set so they can never be appended
+	// to a newer, shorter one.
+	for (let i = parts.length + 1; i <= parts.length + 10; i++) {
+		if (props.getProperty(`COOKIE_${game}_${i}`) === null) break;
+		props.deleteProperty(`COOKIE_${game}_${i}`);
+	}
+	props.deleteProperty(`COOKIE_${game}`);
+}
+
 function getCookies (game) {
-	const stored = PropertiesService.getScriptProperties().getProperty(`COOKIE_${game}`);
+	const stored = readCookieProperty(game);
 	if (stored) {
 		try {
 			const arr = JSON.parse(stored);
@@ -131,6 +173,13 @@ function getWebhook () {
 	return trimmed;
 }
 
+// UrlFetchApp embeds the requested URL in DNS / "Address unavailable" errors,
+// and a Discord webhook URL contains its token. Strip it before it reaches the
+// execution log, where anyone with project access could copy it.
+function redactWebhook (text) {
+	return String(text).replace(/https:\/\/discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/g, "<webhook>");
+}
+
 function getDiscordUserId () {
 	return PropertiesService.getScriptProperties().getProperty("DISCORD_ID") || DISCORD_USER_ID;
 }
@@ -141,7 +190,7 @@ function storeSecretsFromConfig () {
 	const props = PropertiesService.getScriptProperties();
 	for (const game of ["genshin", "honkai", "starrail", "zenless"]) {
 		if (Array.isArray(config[game]?.data) && config[game].data.length > 0) {
-			props.setProperty(`COOKIE_${game}`, JSON.stringify(config[game].data));
+			writeCookieProperty(game, config[game].data);
 		}
 	}
 	if (DISCORD_WEBHOOK) props.setProperty("WEBHOOK_URL", DISCORD_WEBHOOK);
@@ -182,6 +231,22 @@ function guardResponse (response) {
 		return { status: code, transient: true };
 	}
 	return { status: code };
+}
+
+// Cloudflare sits in front of every HoYoLAB endpoint and serves its challenge
+// or rate-limit page with ANY status code (200, 401, 404 included), so a
+// non-JSON body is not limited to the 403/429/5xx cases guardResponse knows.
+// Parsing it used to abort the run with "Unexpected token '<'". parseJson()
+// turns that into a normal transient outage the callers can report.
+function parseJson (response, guard) {
+	try {
+		return { ok: true, data: JSON.parse(response.getContentText()) };
+	}
+	catch (e) {
+		const status = (guard && guard.status) || response.getResponseCode();
+		console.error(`Non-JSON response (HTTP ${status}) — treating as server unavailable`);
+		return { ok: false, status: status };
+	}
 }
 
 // Stable per-account device fingerprint. HoYoLAB's risk engine watches the
@@ -366,6 +431,15 @@ const NOTIFICATIONS = [];
 // Captured at module load; the redemption loops compare against this to stop
 // early when the GAS 6-minute execution limit is near (see config.maxExecutionTimeMs).
 const SCRIPT_START_TIME = Date.now();
+
+// Seconds kept free at the end of a run so the Discord report still goes out
+// before Apps Script's hard 6-minute cutoff kills the execution.
+const EXECUTION_RESERVE_MS = 60000;
+
+function outOfTimeBudget () {
+	const limit = typeof config.maxExecutionTimeMs === "number" ? config.maxExecutionTimeMs : 300000;
+	return Date.now() - SCRIPT_START_TIME >= Math.max(limit - EXECUTION_RESERVE_MS, 0);
+}
 
 // Retcodes from the cdkey redemption API, mapped from the upstream
 // hoyolab-auto error-messages table (torikushiii/hoyolab-auto) plus the
@@ -653,7 +727,7 @@ function flushDiscordNotifications () {
 			}
 		}
 		catch (e) {
-			console.error("flushDiscordNotifications", `Failed to POST to Discord: ${e?.message || e}`);
+			console.error("flushDiscordNotifications", `Failed to POST to Discord: ${redactWebhook(e?.message || e)}`);
 		}
 		if (i < chunks.length - 1) {
 			Utilities.sleep(1000);
@@ -749,7 +823,7 @@ class Game {
 		for (const cookie of accounts) {
 			// Same 6-minute budget guard as the redemption loops: many accounts
 			// × slow sign-in can exhaust the budget before codes are touched.
-			if (typeof config.maxExecutionTimeMs === "number" && Date.now() - SCRIPT_START_TIME >= config.maxExecutionTimeMs) {
+			if (outOfTimeBudget()) {
 				logNotification("warn", this.fullName, "Stopping early: execution time limit reached (see config.maxExecutionTimeMs)", buffer);
 				break;
 			}
@@ -815,29 +889,32 @@ class Game {
 					continue;
 				}
 
+				// The award list only supplies today's reward NAME. Never let a
+				// flaky /home endpoint cancel the sign-in itself: that is the one
+				// irreversible action of the run.
 				const awardsData = await this.getAwardsData(cookie);
+				let awards = null;
 				if (!awardsData.success) {
-					if (awardsData.transient) {
-						logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): HoYoLAB server unavailable (awards) — retry later`, buffer);
-					}
-					else if (awardsData.blocked) {
-						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Blocked by HoYoLAB WAF/Cloudflare (HTTP 403) — skipping account`, buffer);
-					}
-					else {
-						logNotification("error", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): Failed to get awards data`, buffer);
-					}
-					continue;
+					const reason = awardsData.blocked
+						? "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403)"
+						: awardsData.transient
+							? "HoYoLAB server unavailable"
+							: "Failed to get awards data";
+					logNotification("warn", this.fullName, `${accountDetails.nickname} (${accountDetails.uid}): ${reason} (awards) — signing anyway, reward name unknown`, buffer);
 				}
-
-				const awards = awardsData.data;
+				else {
+					awards = awardsData.data;
+				}
 
 				const totalSigned = data.total;
 				// total_sign_day is normally the index of today's award, but guard
 				// against any month-length surprise instead of crashing on undefined.
 				// At event end (total == awards.length) `total % length` would wrap
 				// to day 1 — clamp to the LAST reward instead.
-				const awardIndex = Math.min(totalSigned, awards.length - 1);
-				const awardEntry = awards[awardIndex] || null;
+				const awardIndex = Array.isArray(awards) && awards.length > 0
+					? Math.min(totalSigned, awards.length - 1)
+					: -1;
+				const awardEntry = awardIndex >= 0 ? (awards[awardIndex] || null) : null;
 				const awardObject = awardEntry
 					? {
 						name: awardEntry.name,
@@ -929,7 +1006,11 @@ class Game {
 					if (g.blocked) {
 						throw new Error(`Blocked by HoYoLAB WAF/Cloudflare (HTTP ${g.status}) — try again later`);
 					}
-					const data = JSON.parse(response.getContentText());
+					const parsed = parseJson(response, g);
+					if (!parsed.ok) {
+						throw new Error(`HoYoLAB returned a non-JSON response (HTTP ${parsed.status}) — server or WAF unavailable, try again later`);
+					}
+					const data = parsed.data;
 
 					if (g.status !== 200 || data.retcode !== 0) {
 						// Surface the most common failure (stale/expired cookie) with a
@@ -992,7 +1073,11 @@ class Game {
 				console.error(`${this.fullName}:sign`, "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403).");
 				return { success: false, blocked: true, message: "blocked by HoYoLAB WAF/Cloudflare" };
 			}
-			const data = JSON.parse(response.getContentText());
+			const parsed = parseJson(response, g);
+			if (!parsed.ok) {
+				return { success: false, transient: true, status: parsed.status, message: "HoYoLAB returned a non-JSON response — server unavailable, retry later" };
+			}
+			const data = parsed.data;
 
 			// Detect a geetest/risk-gate response first — HoYoLAB returns a
 			// CAPTCHA challenge with `gt_result.is_risk` even when retcode is 0,
@@ -1054,7 +1139,11 @@ class Game {
 				console.error(`${this.fullName}:getSignInfo`, "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403).");
 				return { success: false, blocked: true, message: "blocked by HoYoLAB WAF/Cloudflare" };
 			}
-			const data = JSON.parse(response.getContentText());
+			const parsed = parseJson(response, g);
+			if (!parsed.ok) {
+				return { success: false, transient: true, status: parsed.status, message: "HoYoLAB returned a non-JSON response — server unavailable, retry later" };
+			}
+			const data = parsed.data;
 
 			if (g.status !== 200 || data.retcode !== 0) {
 				// Expired cookie → actionable message (the #1 check-in failure).
@@ -1102,7 +1191,11 @@ class Game {
 				console.error(`${this.fullName}:getAwardsData`, "Blocked by HoYoLAB WAF/Cloudflare (HTTP 403).");
 				return { success: false, blocked: true, message: "blocked by HoYoLAB WAF/Cloudflare" };
 			}
-			const data = JSON.parse(response.getContentText());
+			const parsed = parseJson(response, g);
+			if (!parsed.ok) {
+				return { success: false, transient: true, status: parsed.status, message: "HoYoLAB returned a non-JSON response — server unavailable, retry later" };
+			}
+			const data = parsed.data;
 
 			if (g.status !== 200 || data.retcode !== 0) {
 				console.error(
@@ -1163,6 +1256,12 @@ class Game {
 	}
 
 	async redeemCodes (account, buffer) {
+		// Three source fetches cost seconds; check the budget before them, not
+		// after, and keep the flush reserve (see EXECUTION_RESERVE_MS).
+		if (outOfTimeBudget()) {
+			logNotification("warn", this.fullName, "Stopping early to avoid the Apps Script 6-minute execution limit — remaining codes were not attempted", buffer);
+			return;
+		}
 		const codes = await this.fetchCodes(buffer);
 		const redeemedCodes = this.getRedeemedCodes(account.uid);
 		const blockedCodes = this.getBlockedCodes(account.uid);
@@ -1207,7 +1306,7 @@ class Game {
 
 			// GAS hard-kills scripts past the 6-minute limit (free accounts);
 			// stop redeeming early so the Discord report still gets flushed.
-			if (typeof config.maxExecutionTimeMs === "number" && Date.now() - SCRIPT_START_TIME >= config.maxExecutionTimeMs) {
+			if (outOfTimeBudget()) {
 				logNotification("warn", this.fullName, `Stopping early to avoid GAS 6-minute execution limit`, buffer);
 				break;
 			}
@@ -1299,6 +1398,10 @@ class Game {
 
 	// Force redemption of all codes regardless of previous redemption status
 	async forceRedeemCodes (account, buffer) {
+		if (outOfTimeBudget()) {
+			logNotification("warn", this.fullName, "Stopping early to avoid the Apps Script 6-minute execution limit — remaining codes were not attempted", buffer);
+			return;
+		}
 		const codes = await this.fetchCodes(buffer);
 		const blockedCodes = this.getBlockedCodes(account.uid);
 
@@ -1332,7 +1435,7 @@ class Game {
 				continue;
 			}
 			// Same GAS time-budget guard as redeemCodes.
-			if (typeof config.maxExecutionTimeMs === "number" && Date.now() - SCRIPT_START_TIME >= config.maxExecutionTimeMs) {
+			if (outOfTimeBudget()) {
 				logNotification("warn", this.fullName, `Stopping early to avoid GAS 6-minute execution limit`, buffer);
 				break;
 			}
@@ -1409,8 +1512,8 @@ class Game {
 	}
 
 	async fetchCodes (buffer) {
-		// Cache even an empty result: if both sources returned 0 codes (or the
-		// fetch failed and the caller already logged an error), there is no
+		// Cache even an empty result: if every source returned 0 codes (or the
+		// fetch failed and this layer already logged it), there is no
 		// point re-hitting the same URLs for every account of this game.
 		if (this._codesCache) return this._codesCache;
 
@@ -1466,7 +1569,11 @@ class Game {
 				console.error(`Code ${code} redemption skipped for ${this.fullName}: blocked by HoYoLAB WAF/Cloudflare (HTTP 403)`);
 				return { success: false, blocked: true, status: g.status, message: "blocked by HoYoLAB WAF/Cloudflare" };
 			}
-			const data = JSON.parse(response.getContentText());
+			const parsed = parseJson(response, g);
+			if (!parsed.ok) {
+				return { success: false, transient: true, status: parsed.status, message: "HoYoLAB returned a non-JSON response — server unavailable, retry later" };
+			}
+			const data = parsed.data;
 
 			// Check for authentication errors and other failures
 			// HoYoLAB's risk-gate can appear even with retcode 0, so check it first.
@@ -1497,6 +1604,18 @@ class Game {
 				// Benign outcomes: code already used on this account, or code
 				// expired/never valid. Callers report these as skip/warn, never
 				// as errors.
+				// A region/platform reject can arrive with the generic "already
+				// used" retcode. Check the message text FIRST so such a code goes
+				// to the permanent blocklist instead of being remembered as
+				// redeemed on this account.
+				const rejectMsg = data.message || "";
+				const permanentReject = (
+					/region.*(not eligible|not applicable|not available)|(not eligible|not applicable|not available).*region|cannot be redeemed on this platform/i.test(rejectMsg)
+				) && !/temporar|try again|please try|unavailable for now|not yet/i.test(rejectMsg);
+				if (permanentReject && REDEEM_RETCODE_ALREADY_USED.includes(data.retcode)) {
+					console.log(`Code ${code} permanently not eligible for ${this.fullName}: ${rejectMsg}`);
+					return { success: false, permanent: true, message: rejectMsg || "Code not eligible for this account" };
+				}
 				if (REDEEM_RETCODE_ALREADY_USED.includes(data.retcode)) {
 					console.log(`Code ${code} already used for ${this.fullName} (retcode ${data.retcode})`);
 					return { success: false, alreadyUsed: true, message: data.message || "Already redeemed" };
@@ -1525,13 +1644,9 @@ class Game {
 				// verb in either order) and excludes transient wording ("temporarily",
 				// "try again", "not yet") so a code that is merely unavailable for
 				// now is never locked forever.
-				const msg = data.message || "";
-				const permanentReject = (
-					/region.*(not eligible|not applicable|not available)|(not eligible|not applicable|not available).*region|cannot be redeemed on this platform/i.test(msg)
-				) && !/temporar|try again|please try|unavailable for now|not yet/i.test(msg);
 				if (permanentReject) {
-					console.log(`Code ${code} permanently not eligible for ${this.fullName}: ${msg}`);
-					return { success: false, permanent: true, message: msg || "Code not eligible for this account" };
+					console.log(`Code ${code} permanently not eligible for ${this.fullName}: ${rejectMsg}`);
+					return { success: false, permanent: true, message: rejectMsg || "Code not eligible for this account" };
 				}
 				console.error(`Code ${code} redemption failed for ${this.fullName}:`, data);
 				return { success: false, message: data.message || `retcode ${data.retcode}` };
@@ -1541,7 +1656,10 @@ class Game {
 		}
 		catch (e) {
 			console.error(`Error redeeming code ${code} for ${this.fullName}:`, e);
-			return { success: false, message: e?.message || String(e) };
+			// A thrown fetch (DNS, socket, timeout) is a transport failure, not a
+			// verdict on this code: mark it transient so the loop stops instead
+			// of hammering a dead host once per remaining code.
+			return { success: false, transient: true, message: redactWebhook(e?.message || String(e)) };
 		}
 	}
 
@@ -1824,9 +1942,11 @@ function checkInGame (gameName) {
 				return { successes: publicSuccesses, buffer };
 			}
 
-			// If no new sign-ins happened, codes are NOT re-checked (this is
-			// documented upstream behaviour). Tell the user so the Discord
-			// message doesn't look like we forgot about codes.
+			// Accounts that were already signed in are pushed into `successes`
+			// by checkAndExecute when redeemCodesEvenIfSignedIn is true (the
+			// default), so reaching this branch means nobody signed in at all -
+			// there is nothing to redeem for. Say so, otherwise the Discord
+			// report looks like the script forgot about codes.
 			if (successes.length === 0) {
 				const hasAccounts = cookies.length > 0;
 				if (hasAccounts) {

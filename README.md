@@ -76,19 +76,21 @@ const DISCORD_USER_ID = "";    // optional: your Discord user ID (pings you on e
 With a webhook set, **every** run posts a single Discord message — a short voice line from Ju Fufu 🐯, the check-in report grouped per account (each line in a quote block), and promo-code lines if redemption is on:
 
 ```text
-Fu-fu~ A calm morning. All rewards collected, all tails in order~ 🐯
+Fu-fu-fu~ 🐯 The little tiger went hunting today — look what she dragged back!
 > ✅ [Genshin Impact] Alice: Got Primogem x20 (total: 31)
 > ⏭️ [Honkai: Star Rail] Bob: Already signed in today (total: 14)
 > 🎁 [Genshin Impact] Alice: +2 new — GENSHIN2026, NEWCODE01
 > ⏭️ [Genshin Impact] Alice: rest — 3 already redeemed, 1 expired
 > ⚠️ [Genshin Impact] Alice: 2 in cooldown — retried next run
 
-Nothing new — and that's good too. Rest now, dear~ 🐯
+The loot is delivered, the tails are happy~ See you tomorrow, sunshine! 🐯
 ```
+
+The intro/outro pair is picked from four mood sets — `errors`, `codes`, `ok`, `quiet` — so a run with fresh claims gets the "hunt" lines and a run where everything was already done gets the calm ones.
 
 Report lines use a single `>` quote prefix so Ju Fufu's sign-off (after the blank line) stays outside the quote block.
 
-Promo codes are **grouped per account** (one line for new claims + one compact summary), not one line per code.
+Promo results are **grouped per account**: claimed and skipped codes share one line each, and every code that failed (`❌`) gets its own line — with ~10 active codes a failure-heavy run can reach five lines per account.
 
 > 🔒 **Prefer keeping secrets out of the file?** You can store cookies and the webhook in Apps Script **Script Properties** instead — see [Configuration reference](#storing-secrets-in-script-properties).
 
@@ -120,7 +122,7 @@ Already-redeemed codes are remembered in `PropertiesService`, so they won't be c
    - **Time:** pick **05:00–06:00 server time** for your region — see [Daily reset schedule](#daily-reset-schedule).
 4. Save and accept the authorisation prompts.
 
-**One-click alternative:** run `createDailyTrigger()` from the editor — it removes any old triggers and installs the daily `checkInAllGames` run at 08:00 (pass a different hour to override, e.g. `createDailyTrigger(6)`).
+**One-click alternative:** run `createDailyTrigger()` from the editor — it removes existing `checkInAllGames` triggers and installs one daily trigger in the 08:00 hour (pass an integer 0-23 to override, e.g. `createDailyTrigger(6)`; anything else throws). `atHour(8)` means somewhere inside that hour, not exactly 08:00.
 
 ### 6. Run it once manually
 
@@ -164,8 +166,8 @@ How the script classifies each redemption attempt (by API retcode):
 
 | Retcode / response | Meaning | Script reaction |
 |---|---|---|
-| `-2017` / `-2018` | Already redeemed on this account | Skip, remember, never retry |
-| `-2001` / `-2003` | Expired / invalid | Warning (⚠️), remembered, never retried |
+| `-2017` / `-2018` | Already redeemed on this account | Skip, remember, never retry — unless the message says region/platform-locked, then it goes to the blocklist (🚫) |
+| `-2001` / `-2003` | Expired / invalid | Folded into the `nothing new (N expired)` skip line, remembered, never retried |
 | `-2006` | Code's global usage limit reached | Warning (⚠️), remembered, never retried |
 | `-2016` (cooldown), `-1048` (API busy) | Transient | Not remembered, retried next run |
 | `-1071` / `-100` / `-10001` | Cookie expired | Stop the rest of this account's codes, clear message |
@@ -235,14 +237,14 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 
 | Symptom | Fix |
 |---|---|
-| **Nothing in Discord** | Check `DISCORD_WEBHOOK` is the full `https://discord.com/api/webhooks/…` URL. Check **Executions** for a `flushDiscordNotifications` error. If every account was already signed in and nothing else happened, the buffer is empty and the script deliberately sends nothing. |
-| **"HoYoLAB server unavailable (HTTP 5xx/429) — retry later"** | Transient — the API is down or rate-limiting. Nothing is broken; nothing is marked redeemed; the next run retries. If it persists for hours, check HoYoLAB announcements. |
+| **Nothing in Discord** | Check `DISCORD_WEBHOOK` is the full `https://discord.com/api/webhooks/…` URL. Check **Executions** for a `flushDiscordNotifications` error. A run with a valid webhook almost always posts something: accounts that were already signed in still produce a ⏭️ line. Silence means the webhook is unset or failed validation. |
+| **"HoYoLAB server unavailable (HTTP 503) — retry later"** | Transient — the API is down, rate-limiting, or serving a Cloudflare page instead of JSON. Nothing is marked redeemed; the next run retries. If it persists for hours, check HoYoLAB announcements. |
 | **"Cookie is missing ltuid/ltuid_v2"** | The cookie is a partial copy or expired. Re-grab the full cookie (step 2, from the `getGameRecordCard` request). |
 | **"Cookie is missing ltoken/ltoken_v2"** | Same fix — the cookie is partial; re-grab it the same way. |
 | **`Error: undefined`** | The underlying error had no `.message`. The function name in the surrounding text tells you which API call failed; full error is in **Executions**. |
 | **"cookie expired — grab a fresh one"** | Cookie expired (`-1071`/`-100`/`-10001`). The script stops that account's codes and reports once. Re-grab the cookie. |
 | **Already signed in, but codes not claimed** | Check `enableCodeRedemption` and `redeemCodesEvenIfSignedIn` (both default `true`). If you set the latter to `false`, codes only redeem for accounts that *just* signed in — force once with `redeemGenshinCodes(true)` etc. |
-| **"Unknown region" for a whole account** | Your account is on a server the script doesn't recognise yet. The account is skipped with a single error line; no codes are attempted. Report the region name in an issue so it can be mapped. |
+| **"Unknown region" for a whole account** | Your account is on a server the script doesn't recognise yet. Check-in still runs; only code redemption for that account is skipped (one error line, no codes attempted). Report the region name in an issue so it can be mapped. |
 
 ---
 
@@ -254,7 +256,7 @@ Schedule for **05:00 server time** in your region (or the latest region, if you 
 | Discord notifications on code redemption | ❌ | ✅ |
 | Discord notifications on errors | ❌ | ✅ |
 | Webhook POSTs per run | up to 4 × accounts | 1, plus 1 per extra chunk when the report exceeds 1900 chars |
-| Files in the repo | 100+ | 10 |
+| Files in the repo | 100+ | 11 |
 | Code source | `api.ennead.cc` only | `api.ennead.cc` + Hum-Bao + seriaati, merged and deduplicated |
 
 ---
@@ -275,4 +277,4 @@ npm test
 node services/google-script/__tests__/smoke-test.js
 ```
 
-It covers check-in, per-account code redemption, retcode classification, HTTP 429/5xx handling, legacy-key migration, and the Discord report format.
+95 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget, chunked cookie storage, legacy-key migration, and the Discord report format.

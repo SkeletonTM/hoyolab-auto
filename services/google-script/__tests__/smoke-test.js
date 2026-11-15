@@ -187,7 +187,7 @@ function load (overrides = {}) {
 	// enableCodeRedemption defaults to true, so tests no longer patch it.
 	const src = fs.readFileSync(__dirname + "/../index.js", "utf8")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
-		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders };", sandbox);
+		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty };", sandbox);
 	return sandbox.__api;
 }
 
@@ -1397,6 +1397,72 @@ function load (overrides = {}) {
 		assert.ok(payload.content.startsWith("<@123456789012345678>"), "configured id mentioned on the error chunk");
 		assert.deepStrictEqual(payload.allowed_mentions.users, ["123456789012345678"], "only that id is allowed");
 		assert.deepStrictEqual(payload.allowed_mentions.parse, [], "nothing else is parsed");
+	});
+
+	// 56. A non-JSON body can arrive with ANY status: Cloudflare serves its
+	// challenge page with 200/401/404 too, and JSON.parse on it used to kill
+	// the run with "Unexpected token '<'" instead of a readable outage line.
+	await t("non-JSON 200 body is reported as an outage, not a crash", async () => {
+		const api = load({
+			"getGameRecordCard": () => ({
+				getResponseCode: () => 200,
+				getContentText: () => "<!DOCTYPE html><title>Just a moment...</title>"
+			})
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		const text = postedToDiscord.join("\n");
+		assert.ok(/non-JSON|unavailable/i.test(text), `report explains the outage: ${text}`);
+		assert.ok(!/Unexpected token/.test(text), "raw JSON.parse error never reaches the report");
+	});
+
+	// 57. The award list only supplies today's reward name. Losing it must not
+	// skip the sign-in itself - that is the one irreversible action of the day.
+	await t("awards failure does not cancel the daily sign-in", async () => {
+		const api = load({
+			"/home?act_id": () => ({ getResponseCode: () => 200, getContentText: () => "<html>nope</html>" })
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.checkInAllGames();
+		assert.ok(fetchLog.some(u => u.includes("/sign")), "sign-in was still requested");
+		const text = postedToDiscord.join("\n");
+		assert.ok(/Got Unknown reward/.test(text), `sign-in succeeds with a placeholder reward: ${text}`);
+		assert.ok(/awards\) — signing anyway/.test(text), "the outage is still mentioned");
+	});
+
+	// 58. A thrown fetch (DNS, socket, timeout) is a transport failure: mark it
+	// transient so the loop stops instead of hammering a dead host per code.
+	await t("a thrown redeem request stops the remaining codes", async () => {
+		const api = load({
+			"webExchangeCdkey": () => { throw new Error("DNS error: https://example.invalid/x"); }
+		});
+		api.config.genshin.data = [COOKIE];
+		await api.manuallyRedeemCodes("genshin");
+		const hits = fetchLog.filter(u => u.includes("webExchangeCdkey")).length;
+		assert.strictEqual(hits, 1, "only one code attempted after the transport error");
+		assert.ok(/unavailable/i.test(postedToDiscord.join("\n")), "report says the server is unavailable");
+	});
+
+	// 59. Apps Script caps one property value at 9KB. Five or more full session
+	// cookies exceed it, so the write must be chunked, not silently fatal.
+	await t("large cookie sets are chunked under the 9KB property limit", async () => {
+		const api = load();
+		const big = Array.from({ length: 8 }, (_, i) =>
+			`ltuid_v2=${1000 + i}; cookie_token_v2=${"a".repeat(1500)}; ltoken_v2=${"b".repeat(600)}`);
+		api.config.genshin.data = big;
+		api.storeSecretsFromConfig();
+		const sizes = Object.values(properties).map(v => String(v).length);
+		assert.ok(sizes.every(n => n <= 9000), `every property under 9KB, got ${Math.max(...sizes)}`);
+		assert.deepStrictEqual(api.getCookies("genshin"), big, "cookies round-trip intact");
+	});
+
+	// 60. UrlFetchApp embeds the requested URL in DNS/address errors, so the
+	// webhook token would land in the execution log unless it is stripped.
+	await t("webhook token is redacted from logged fetch errors", async () => {
+		const api = load();
+		const raw = "DNS error: https://discord.com/api/webhooks/1234567890/testhook";
+		assert.strictEqual(api.redactWebhook(raw), "DNS error: <webhook>");
+		assert.ok(!api.redactWebhook(raw).includes("testhook"));
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

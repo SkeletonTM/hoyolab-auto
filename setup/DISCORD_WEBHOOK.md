@@ -61,7 +61,8 @@ report (grouped per account), and promo-code lines if redemption is enabled.
 If nothing arrives:
 
 - If nothing arrives at all: the URL must be the full `https://discord.com/api/webhooks/…` value.
-- The script sends nothing only when there is genuinely nothing to report — e.g. no
-  accounts configured. An account that was already signed in still logs an
-  "Already signed in today" line, so that case does produce a message.
+- With a valid webhook a run almost always posts: an account that was already
+  signed in still logs an "Already signed in today" line. Even a run with no
+  accounts configured posts a warning block. Silence means the webhook is unset
+  or rejected by `getWebhook()`'s URL check.
 - Check the **Executions** tab for a `flushDiscordNotifications` error.
