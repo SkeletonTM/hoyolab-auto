@@ -43,6 +43,9 @@ let properties = {};
 let propertyReads = {}; // per-key getProperty call counter (device-id caching assertion)
 let postedToDiscord = [];
 let postedPayloads = []; // full webhook JSON bodies (allowed_mentions assertions)
+let clockSkewMs = 0;     // simulated elapsed time for budget tests
+let slowUrls = new Set(); // url patterns whose stub burns wall-clock time
+const RealDate = Date;
 let consoleLog = []; // every console.* call from index.js, arguments serialized
 let lockAvailable = true; // LockService stub: false simulates another instance running
 let lockHeld = false; // LockService state: true while a run holds the script lock
@@ -141,6 +144,7 @@ function makeSandbox () {
 				if (url.includes("/sign") && opts && opts.method === "POST") signBodies.push(opts.payload || "");
 				for (const [pattern, responder] of Object.entries(responseMap)) {
 					if (url.includes(pattern)) {
+						if (slowUrls.has(pattern)) clockSkewMs += 5000; // stalled request
 						const body = typeof responder === "function" ? responder(url, opts) : responder;
 						// Raw-response stubs (for HTTP-level tests: 429/5xx) return an
 						// object with getResponseCode; pass them through untouched.
@@ -169,7 +173,7 @@ function load (overrides = {}) {
 	fetchLog = []; fetchOptsLog = []; signBodies = []; postedToDiscord = []; postedPayloads = []; sleepCalls = []; headerLog = [];
 	consoleLog = []; lockHeld = false;
 	uuidCounter = 0; discordResponder = null;
-	properties = {}; propertyReads = {}; triggerLog = []; // fresh script-properties per scenario — tests must not leak state
+	properties = {}; propertyReads = {}; triggerLog = []; clockSkewMs = 0; slowUrls = new Set(); // fresh state per scenario
 	// Object-spread would let defaults overwrite same-key overrides; instead
 	// build an ordered entries array where overrides always match first.
 	const defaults = {
@@ -194,11 +198,18 @@ function load (overrides = {}) {
 	for (const k of order) ordered[k] = responseMap[k];
 	responseMap = ordered;
 	const sandbox = makeSandbox();
+	// Time-warpable Date: budget tests advance clockSkewMs to simulate requests
+	// that actually consume their timeout.
+	sandbox.__slowSet = slowUrls; // same Set instance the fetch stub reads
+	sandbox.Date = Object.assign(
+		function (...args) { return args.length ? new RealDate(...args) : new RealDate(RealDate.now() + clockSkewMs); },
+		{ now: () => RealDate.now() + clockSkewMs, parse: RealDate.parse, UTC: RealDate.UTC, prototype: RealDate.prototype }
+	);
 	vm.createContext(sandbox);
 	// enableCodeRedemption defaults to true, so tests no longer patch it.
 	const src = fs.readFileSync(__dirname + "/../index.js", "utf8")
 		.replace(/DISCORD_WEBHOOK = null/, 'DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1234567890/testhook"');
-		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty, requestTimeoutSeconds, timeBudgetLeftMs, __setScriptStart: (ms) => { SCRIPT_START_TIME = ms; } };", sandbox);
+		vm.runInContext(src + "\n;this.__api = { checkInAllGames, checkInGame, manuallyRedeemCodes, createDailyTrigger, config, NOTIFICATIONS, extractLtuid, getWebhook, splitMessage, fetchCodes, viewAllRedeemedCodes, resetAllRedeemedCodes, juFufuContextualLines, formatCodeReport, Game, browserHeaders, getCookies, storeSecretsFromConfig, redactWebhook, parseJson, outOfTimeBudget, writeCookieProperty, readCookieProperty, requestTimeoutSeconds, timeBudgetLeftMs, __setScriptStart: (ms) => { SCRIPT_START_TIME = ms; }, __slow: (pattern) => __slowSet.add(pattern) };", sandbox);
 	return sandbox.__api;
 }
 
@@ -1594,6 +1605,36 @@ function load (overrides = {}) {
 		const remaining = triggerLog.filter(t => t.action === "create" && t.handler === "checkInAllGames");
 		assert.strictEqual(remaining.length, 1, "the original trigger survived");
 		assert.strictEqual(remaining[0].hour, 8, "and still points at the original hour");
+	});
+
+	// 71. The reserve is not spendable by work: with 61s on the hard clock only
+	// 1s of work is allowed, so a slow record-card call must stop the account
+	// before sign-info/sign start - and the report still goes out.
+	await t("work requests cannot consume the flush reserve", async () => {
+		const api = load();
+		api.config.genshin.data = [COOKIE];
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 61000));
+		api.__slow("getGameRecordCard");
+		await api.checkInAllGames();
+		assert.ok(postedToDiscord.length >= 1, "report still flushed");
+		assert.strictEqual(fetchLog.filter(u => u.includes("/info?")).length, 0, "sign-info never started inside the reserve");
+		assert.strictEqual(fetchLog.filter(u => u.includes("/sign")).length, 0, "sign never started inside the reserve");
+	});
+
+	// 72. A source skipped for budget is not an outage: the report must say it
+	// was not checked, never "sources unreachable".
+	await t("sources skipped for the budget are not reported as unreachable", async () => {
+		const api = load({ "api.ennead.cc": { active: [] } });
+		api.config.genshin.data = [COOKIE];
+		api.config.maxExecutionTimeMs = 300000;
+		api.__setScriptStart(Date.now() - (300000 - 62000));
+		api.__slow("api.ennead.cc");
+		await api.manuallyRedeemCodes("genshin");
+		const text = postedToDiscord.join("\n");
+		assert.ok(!/unreachable/i.test(text), `no fake outage: ${text}`);
+		assert.ok(/not checked|time budget/i.test(text), `budget skip is named: ${text}`);
+		assert.strictEqual(fetchLog.filter(u => u.includes("raw.githubusercontent.com")).length, 0, "second source never requested");
 	});
 
 	console.log(`\n${passed} passed, ${failed} failed`);

@@ -156,11 +156,18 @@ function timeBudgetLeftMs () {
 	return limit - (Date.now() - SCRIPT_START_TIME);
 }
 
+// The flush reserve is not spendable by work: a request may only use what is
+// left before EXECUTION_RESERVE_MS, otherwise one slow call eats the window
+// the report needs. (Hard deadline = maxExecutionTimeMs, 6 min in Apps Script.)
+function workTimeLeftMs () {
+	return timeBudgetLeftMs() - EXECUTION_RESERVE_MS;
+}
+
 // A fixed 30s bound is not enough: if a phase starts near the cutoff, four
 // sequential requests can still overrun the 6-minute limit and starve the
-// Discord flush. The timeout therefore follows the remaining budget (keeping a
-// few seconds for response handling), capped at REQUEST_TIMEOUT_SECONDS.
-function requestTimeoutSeconds (leftMs = timeBudgetLeftMs()) {
+// Discord flush. The timeout therefore follows the remaining WORK budget
+// (keeping a few seconds for response handling), capped at REQUEST_TIMEOUT_SECONDS.
+function requestTimeoutSeconds (leftMs = workTimeLeftMs()) {
 	return Math.max(1, Math.min(REQUEST_TIMEOUT_SECONDS, Math.floor((leftMs - 3000) / 1000)));
 }
 
@@ -646,21 +653,30 @@ function formatCodeReport (gameName, account, total, claimed, skipped, expired, 
 		lines.push(`⏭️ [${gameName}] ${label}: rest — ${parts.join(", ")}`);
 	}
 	const known = sourceState && sourceState.total > 0;
+	const failedCount = known ? (sourceState.failed || 0) : 0;
+	const skippedCount = known ? (sourceState.skipped || 0) : 0;
+	// Distinguish an outage from a budget skip: both leave the list incomplete,
+	// but only one of them means the mirrors are down.
+	const gapParts = [];
+	if (failedCount > 0) gapParts.push(`${failedCount}/${sourceState.total} sources failed`);
+	if (skippedCount > 0) gapParts.push(`${skippedCount}/${sourceState.total} not checked (time budget)`);
+	const gap = gapParts.length ? ` — ${gapParts.join(", ")}, list may be incomplete` : "";
 	if (total === 0) {
-		if (known && sourceState.failed === sourceState.total) {
+		if (known && failedCount === sourceState.total) {
 			// Every source was down: an outage is not an empty list, and
 			// reporting "no active codes" here would hide missed promos.
-			return [`⚠️ [${gameName}] ${label}: promo-code sources unreachable (${sourceState.failed}/${sourceState.total}) — nothing could be checked`];
+			return [`⚠️ [${gameName}] ${label}: promo-code sources unreachable (${failedCount}/${sourceState.total}) — nothing could be checked`];
 		}
-		const gap = known && sourceState.failed > 0
-			? ` — ${sourceState.failed}/${sourceState.total} sources failed, list may be incomplete`
-			: "";
+		if (known && skippedCount === sourceState.total) {
+			// Nothing was even requested — never call that an outage.
+			return [`⚠️ [${gameName}] ${label}: promo-code sources not checked — the execution time budget ran out before the first request`];
+		}
 		// No active codes at all — one line instead of an empty-looking report.
 		return [`ℹ️ [${gameName}] ${label}: no active promo codes right now${gap}`];
 	}
-	// Partial outage with codes in hand: still redeem, but flag the gap.
-	if (known && sourceState.failed > 0) {
-		lines.push(`⚠️ [${gameName}] ${label}: ${sourceState.failed}/${sourceState.total} code sources failed — list may be incomplete`);
+	// Partial outage/skip with codes in hand: still redeem, but flag the gap.
+	if (gapParts.length > 0) {
+		lines.push(`⚠️ [${gameName}] ${label}: ${gapParts.join(", ")} — list may be incomplete`);
 	}
 	return lines;
 }
@@ -724,10 +740,13 @@ function flushDiscordNotifications () {
 			content = `<@${discordUserId}> ${content}`;
 			allowedMentions.users = [String(discordUserId)];
 		}
-		// Split the remaining budget across the chunks still to send, so a
-		// multi-chunk report can never be starved by one slow POST.
+		// Split what is left of the HARD deadline across the chunks still to
+		// send, also paying for the 1s pause between them. No lower bound that
+		// could exceed the remaining time: a 3s floor on a 2s window is a kill.
 		const chunksLeft = chunks.length - i;
-		const perChunkTimeout = Math.max(3, Math.min(20, Math.floor((timeBudgetLeftMs() - 5000) / 1000 / chunksLeft)));
+		const pausesLeft = (chunksLeft - 1) * 1200;
+		const perChunkTimeout = Math.max(1, Math.min(20,
+			Math.floor((timeBudgetLeftMs() - pausesLeft - 2000) / 1000 / chunksLeft)));
 		try {
 			const postOptions = {
 				method: "POST",
@@ -748,6 +767,13 @@ function flushDiscordNotifications () {
 					retryAfter = Number(parsed.retry_after) || 0;
 				}
 				catch (e) { /* non-JSON body — fall through with no retry delay */ }
+				// Retrying is pointless if the sleep plus another POST would cross
+				// the hard deadline: the run is killed mid-retry and the report is
+				// lost anyway. Drop this chunk instead.
+				if (timeBudgetLeftMs() < retryAfter * 1000 + 4000) {
+					console.error("flushDiscordNotifications", "HTTP 429 — not enough time left to retry, dropping this chunk");
+					break;
+				}
 				if (retryAfter > 0) {
 					Utilities.sleep(Math.min(retryAfter * 1000, 15000)); // cap at 15s
 				}
@@ -770,7 +796,7 @@ function flushDiscordNotifications () {
 		catch (e) {
 			console.error("flushDiscordNotifications", `Failed to POST to Discord: ${redactWebhook(e?.message || e)}`);
 		}
-		if (i < chunks.length - 1) {
+		if (i < chunks.length - 1 && timeBudgetLeftMs() > 2500) {
 			Utilities.sleep(1000);
 		}
 	}
@@ -887,6 +913,11 @@ class Game {
 					continue;
 				}
 
+				if (outOfTimeBudget()) {
+					logNotification("warn", this.fullName, "Stopping early: execution time limit reached (see config.maxExecutionTimeMs)", buffer);
+					break;
+				}
+
 				const info = await this.getSignInfo(cookie);
 				if (!info.success) {
 					if (info.transient) {
@@ -971,6 +1002,11 @@ class Game {
 						icon: awardEntry.icon
 					}
 					: { name: "Unknown reward", count: 0, icon: "" };
+
+				if (outOfTimeBudget()) {
+					logNotification("warn", this.fullName, "Stopping early: execution time limit reached (see config.maxExecutionTimeMs)", buffer);
+					break;
+				}
 
 				const sign = await this.sign(cookie);
 				if (!sign.success) {
@@ -1585,7 +1621,16 @@ class Game {
 			// report. Values are either a number (answered) or "failed: …".
 			const values = Object.values(sourceHits);
 			const ok = values.filter(v => typeof v === "number").length;
-			this._codesSourceState = { ok, failed: values.length - ok, total: values.length };
+			// "skipped: …" means the budget ran out before the request, which is
+			// not the same as an unreachable source: keep them apart so the
+			// report never claims an outage that never happened.
+			const skippedSources = values.filter(v => typeof v === "string" && v.startsWith("skipped:")).length;
+			this._codesSourceState = {
+				ok,
+				failed: values.length - ok - skippedSources,
+				skipped: skippedSources,
+				total: values.length
+			};
 			this._codesCache = codes;
 			return codes;
 		}
@@ -2178,6 +2223,12 @@ function manuallyRedeemCodes (gameName, forceRedeem = false) {
 	}
 
 	return Promise.all(accounts.map(async (cookieData) => {
+		// Each account costs a record-card call before its codes; check the
+		// budget per account, not once for the whole batch.
+		if (outOfTimeBudget()) {
+			logNotification("warn", gameName, "Stopping early: execution time limit reached (see config.maxExecutionTimeMs)");
+			return { success: false, message: "Execution time limit reached" };
+		}
 		try {
 			const ltuid = extractLtuid(cookieData);
 			if (!ltuid) {
