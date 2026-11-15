@@ -1754,6 +1754,31 @@ function load (overrides = {}) {
 		assert.ok(postedToDiscord.length >= 1, "report still flushed inside the reserve");
 	});
 
+	// 81. A 429 with an unparseable body gives no interval to wait for: retrying
+	// blind would just earn another 429, so nothing more is sent.
+	await t("a 429 without a usable retry_after is not retried blind", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		discordResponder = () => ({ getResponseCode: () => 429, getContentText: () => "<html>rate limited</html>" });
+		await api.checkInAllGames();
+		assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 1, "no immediate second POST");
+		assert.ok(consoleLog.join("\n").includes("without a usable retry_after"), "reason is logged");
+	});
+
+	// 82. A second 429 means the bucket is still empty: stop instead of posting
+	// the next chunk a second later.
+	await t("a second 429 stops the remaining chunks", async () => {
+		const api = load();
+		properties.WEBHOOK_URL = "https://discord.com/api/webhooks/123/abc";
+		api.config.maxExecutionTimeMs = 300000;
+		for (let i = 0; i < 60; i++) api.NOTIFICATIONS.push(`line ${i} ${"x".repeat(120)}`);
+		discordResponder = () => ({ getResponseCode: () => 429, getContentText: () => JSON.stringify({ retry_after: 1 }) });
+		api.flushDiscordNotifications();
+		assert.strictEqual(fetchOptsLog.filter(o => o.url.includes("discord.com")).length, 2, "first POST plus one retry, then stop");
+		assert.ok(consoleLog.join("\n").includes("429 again after waiting"), "second 429 is reported");
+	});
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	process.exit(failed ? 1 : 0);
 })();

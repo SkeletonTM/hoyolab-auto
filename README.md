@@ -160,7 +160,7 @@ If you set a webhook, the Discord report arrives within seconds.
 | `enableCodeRedemption` | `true` | Redeem active promo codes automatically; `false` = check-ins only |
 | `redeemCodesEvenIfSignedIn` | `true` | Also redeem codes for accounts already signed in today; `false` = only for accounts that just signed in |
 | `redeemSleepMs` | `6000` | Pause (ms) between code redemptions — rate-limit guard; hard floor 2000 ms enforced; skipped when the pause would not fit before the report reserve |
-| `maxExecutionTimeMs` | `300000` | Hard cap on total runtime (ms) so the run finishes before the GAS 6-minute limit; work timeouts shrink with the remaining budget, 60 s is reserved for the Discord flush (a report that cannot fit is sent as one truncated message); a value at or below the 60 s reserve stops work immediately while still sending the report (tests use 61500) |
+| `maxExecutionTimeMs` | `300000` | Hard cap on total runtime (ms) so the run finishes before the GAS 6-minute limit; work timeouts shrink with the remaining budget, 60 s is reserved for the Discord flush (a report that cannot fit is sent as one truncated message); a value at or below the 60 s reserve stops work immediately; the report is still sent only if at least ~2 s remain at run start (1.5 s minimum POST window + margin), so a value like `0` or `1000` sends nothing (tests use 61500) |
 
 ### Code outcomes
 
@@ -281,4 +281,4 @@ npm test
 node services/google-script/__tests__/smoke-test.js
 ```
 
-115 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget with budget-aware request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, trigger timezone handling, legacy-key migration, and the Discord report format.
+117 tests cover check-in, per-account code redemption, retcode classification, HTTP 429/5xx and non-JSON responses, the time budget with budget-aware request timeouts, chunked cookie storage, the in-flight code-source cache, mood selection, trigger timezone handling, legacy-key migration, and the Discord report format.

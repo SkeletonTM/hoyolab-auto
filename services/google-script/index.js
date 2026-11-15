@@ -785,12 +785,21 @@ function flushDiscordNotifications () {
 			// (seconds); sleep that long and retry ONCE so a transient burst
 			// of webhook traffic doesn't silently drop the report.
 			if (code === 429) {
-				let retryAfter = 0;
+				let retryAfter = null;
 				try {
 					const parsed = JSON.parse(discordRes.getContentText());
-					retryAfter = Number(parsed.retry_after) || 0;
+					const value = Number(parsed.retry_after);
+					if (Number.isFinite(value) && value >= 0) retryAfter = value;
 				}
-				catch (e) { /* non-JSON body — fall through with no retry delay */ }
+				catch (e) { /* handled below: no usable interval */ }
+				// No usable retry_after means we cannot know when the bucket
+				// resets. Retrying immediately is a guess that usually costs a
+				// second 429, so treat it as "cannot retry safely".
+				if (retryAfter === null) {
+					console.error("flushDiscordNotifications",
+						"HTTP 429 without a usable retry_after — stopping the report instead of retrying blind");
+					break;
+				}
 				// Discord wants the full retry_after interval: waking up early
 				// just earns a second 429 (docs: "do not retry before the bucket
 				// resets"). Either wait the whole interval plus room for one POST,
@@ -814,6 +823,14 @@ function flushDiscordNotifications () {
 				}
 				discordRes = fetchWithTimeout(webhook, postOptions, retryTimeout);
 				code = discordRes.getResponseCode();
+				// Still limited after the wait we were told to make: another
+				// retry (and especially the next chunk a second later) only adds
+				// to the rate-limit bucket. Stop the report here.
+				if (code === 429) {
+					console.error("flushDiscordNotifications",
+						`HTTP 429 again after waiting ${retryAfter}s — stopping, ${chunks.length - i - 1} chunk(s) not sent`);
+					break;
+				}
 			}
 
 			if (code < 200 || code >= 300) {
