@@ -1,6 +1,7 @@
 # HoyoLab Auto — Google Apps Script edition
 
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Tests](https://github.com/SkeletonTM/hoyolab-auto/actions/workflows/tests.yml/badge.svg)](https://github.com/SkeletonTM/hoyolab-auto/actions/workflows/tests.yml)
 
 Automatically signs you into **Genshin Impact, Honkai Impact 3rd, Honkai: Star Rail, and Zenless Zone Zero** every day — and can redeem active promo codes for you.
 
